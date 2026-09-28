@@ -58,14 +58,11 @@ Envoy AI Gateway {{ .Chart.AppVersion }} is installing into namespace {{ .Releas
 
 Next, either:
   * create an AIGatewayRoute to proxy an external model provider; or
-  * install charts/lws-openshift and charts/kserve-llmisvc-openshift to serve
-    your own models with LLMInferenceService. That path needs this release
-    installed with -f values-kserve.yaml (so the listener accepts HTTPRoutes
-    from model namespaces) and the Envoy Gateway release installed with
-    -f values-inference-pool.yaml.
+  * sync charts/lws-openshift and charts/kserve-llmisvc-openshift to serve
+    your own models with LLMInferenceService.
 {{ if ne (toString (dig "namespaces" "from" "" .Values.gateway.listener.allowedRoutes)) "All" -}}
     This release has allowedRoutes.namespaces.from={{ dig "namespaces" "from" "?" .Values.gateway.listener.allowedRoutes }}, which will REJECT
-    KServe's HTTPRoutes. Reinstall with -f values-kserve.yaml first.
+    KServe's HTTPRoutes unless your selector matches the model namespaces.
 {{ end }}
-This release does NOT manage Gateway API CRDs or AI Gateway CRDs; they are
-installed separately by hack/install-crds.sh.
+The AI Gateway CRDs (aigateway.envoyproxy.io) ship in this chart's crds/.
+Gateway API CRDs are never touched: they belong to the cluster-ingress-operator.

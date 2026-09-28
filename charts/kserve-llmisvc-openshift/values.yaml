@@ -1,13 +1,21 @@
 # ---------------------------------------------------------------------------
 # kserve-llmisvc-openshift
 #
-# `openshift:` is added by this wrapper chart. `kserve-llmisvc-resources:` is
-# passed straight through to the upstream kserve-llmisvc-resources v0.21.0-rc1
-# subchart.
+# ONE Argo CD Application points at this directory and gets the whole KServe
+# LLMInferenceService stack, ordered by sync waves (README, "Deploying with
+# Argo CD"):
+#
+#   PreSync      SCC RoleBinding               (Helm hook, weight -5)
+#   wave -10     CRDs, from crds/              (serving.kserve.io, llm-d.ai)
+#   wave   0     llmisvc controller, webhooks, Certificate, ConfigMap, ...
+#   wave  10     13 LLMInferenceServiceConfig presets
+#
+# `openshift:`, `argocd:` and `runtimeConfigs:` are added by this wrapper.
+# `kserve-llmisvc-resources:` and `kserve-runtime-configs:` are passed straight
+# through to the upstream v0.21.0-rc1 subcharts.
 #
 # Five upstream values are overridden; each is marked OVERRIDE with the reason.
-# Everything else is upstream's own default. See README, "Delta from the
-# upstream charts".
+# Everything else is upstream's own default. See PATCHES.md.
 # ---------------------------------------------------------------------------
 
 openshift:
@@ -35,6 +43,32 @@ openshift:
   enforceNamespace: kserve
 
 # ---------------------------------------------------------------------------
+# Argo CD sync waves for what this wrapper renders itself. The CRDs in crds/
+# carry wave -10 as a static annotation (Helm never templates crds/), and the
+# upstream subchart's resources have no annotation hook, so they sit at 0.
+# Only the order matters, not the numbers. Helm ignores all of it.
+# ---------------------------------------------------------------------------
+argocd:
+  syncWave:
+    # After wave 0 is HEALTHY -- Argo CD waits for the controller Deployment
+    # to be Available, which is when the ValidatingWebhookConfiguration for
+    # LLMInferenceServiceConfig finally has endpoints. Any value > 0 works.
+    runtimeConfigs: "10"
+
+# The LLMInferenceServiceConfig presets an LLMInferenceService refers to
+# through spec.baseRefs (kserve-config-llm-template and friends). Rendered by
+# templates/llmisvcconfigs.yaml from the vendored kserve-runtime-configs
+# subchart's own file, so they can carry the wave above. Set false only if
+# something else on the cluster already provides them in this namespace.
+#
+# PLAIN HELM (no Argo CD): Helm applies every manifest in one pass, so on a
+# FIRST install these are rejected by the webhook described above. Install
+# with --set runtimeConfigs.enabled=false --wait, then `helm upgrade` with it
+# back on. Argo CD needs none of that.
+runtimeConfigs:
+  enabled: true
+
+# ---------------------------------------------------------------------------
 # Upstream kserve-llmisvc-resources values
 # ---------------------------------------------------------------------------
 kserve-llmisvc-resources:
@@ -54,10 +88,14 @@ kserve-llmisvc-resources:
       #   inferenceobjectives.llm-d.ai
       #   inferencemodelrewrites.llm-d.ai
       #
-      # Because they land in templates/ and not crds/, Helm owns them:
-      # `helm uninstall` DELETES them, and with them every InferencePool on the
-      # cluster, including other tenants'. hack/install-crds.sh applies the same
-      # four CRDs, rendered from this same chart version, out of band instead.
+      # Because they land in templates/, they would carry no sync wave, no
+      # Prune=false/Delete=false, and `helm uninstall` would DELETE them -- and
+      # with them every InferencePool on the cluster, including other
+      # tenants'. The same four CRDs, rendered from this same chart version by
+      # hack/update-crds.sh, ship instead as static files: the two llm-d.ai
+      # ones in this chart's crds/, the two InferencePool ones in
+      # charts/envoy-gateway-openshift/crds/ (Envoy Gateway watches
+      # InferencePool, so it must exist before Envoy Gateway starts).
       createGIECRDs: false
 
       controller:
@@ -96,11 +134,30 @@ kserve-llmisvc-resources:
           # in place rather than standing up a second one.
           #
           # That listener must accept routes from the model's namespace. The AI
-          # Gateway chart ships `allowedRoutes.namespaces.from: Same`; install
-          # it with -f charts/envoy-ai-gateway-openshift/values-kserve.yaml to
-          # widen it to All.
+          # Gateway chart defaults to `allowedRoutes.namespaces.from: All` for
+          # exactly this reason.
           #
           # Set this back to kserve/kserve-ingress-gateway, and create that
           # Gateway yourself, if you would rather KServe own a separate data
           # plane.
           kserveGateway: envoy-ai-gateway-system/envoy-ai-gateway
+
+# ---------------------------------------------------------------------------
+# Upstream kserve-runtime-configs values
+# ---------------------------------------------------------------------------
+kserve-runtime-configs:
+  kserve:
+    llmisvcConfigs:
+      # Upstream default (false), restated because it is load-bearing: this
+      # wrapper renders the same presets itself, with a sync wave (see
+      # runtimeConfigs above). Turning this on emits every preset twice, at
+      # wave 0, and templates/_validate.tpl fails the render.
+      enabled: false
+
+    servingruntime:
+      # Upstream default. These are the predictive-serving
+      # ClusterServingRuntimes -- sklearn, xgboost, triton, tensorflow,
+      # huggingface and friends. They belong to InferenceService, not
+      # LLMInferenceService, and turning them on would add roughly a dozen
+      # more images to mirror-config.yaml for no benefit here.
+      enabled: false

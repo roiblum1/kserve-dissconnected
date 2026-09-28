@@ -37,13 +37,10 @@ render() {
 
 images() {
   {
-    render envoy-gateway-openshift envoy-gateway-system \
-      -f charts/envoy-gateway-openshift/values-inference-pool.yaml
-    render envoy-ai-gateway-openshift envoy-ai-gateway-system \
-      -f charts/envoy-ai-gateway-openshift/values-kserve.yaml
+    render envoy-gateway-openshift envoy-gateway-system
+    render envoy-ai-gateway-openshift envoy-ai-gateway-system
     render lws-openshift lws-system
     render kserve-llmisvc-openshift kserve
-    render kserve-runtime-configs-openshift kserve
   } | python3 -c '
 import re, sys
 seen = set()

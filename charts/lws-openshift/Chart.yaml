@@ -1,0 +1,32 @@
+apiVersion: v2
+name: lws-openshift
+description: >-
+  LeaderWorkerSet (LWS) packaged for OpenShift. Wraps the upstream `lws` chart
+  unmodified and adds only the SecurityContextConstraints binding OpenShift
+  needs. LWS is the workload API KServe's LLMInferenceService uses for
+  multi-node (tensor/pipeline-parallel) model serving.
+type: application
+version: 0.1.0
+appVersion: "v0.10.0"
+home: https://lws.sigs.k8s.io/
+sources:
+  - https://github.com/kubernetes-sigs/lws
+keywords:
+  - leaderworkerset
+  - lws
+  - multi-node
+  - kserve
+  - openshift
+maintainers:
+  - name: platform-team
+dependencies:
+  # Upstream chart, vendored byte-identical under charts/. The chart is already
+  # named `lws` -- lowercase and DNS-safe -- so no alias is needed and
+  # `.Chart.Name` (which drives app.kubernetes.io/name, part of the immutable
+  # Deployment selector) stays exactly at upstream's value.
+  #
+  # v0.10.0 is the version KServe v0.21.0 pins in
+  # llmisvc-dependency-install.sh (LWS_VERSION). Do not bump it independently.
+  - name: lws
+    version: v0.10.0
+    repository: oci://registry.k8s.io/lws/charts

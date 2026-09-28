@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# Disconnected / mirrored-registry overlay for kserve-llmisvc-openshift.
+#
+# You probably do NOT need this file. If you mirrored with `oc mirror` and
+# mirror-config.yaml, oc-mirror emits an ImageDigestMirrorSet that redirects
+# docker.io/kserve/* to your mirror for every pod on the cluster, with no chart
+# change at all.
+#
+# Use this only when pulls are not redirected cluster-wide and the image
+# reference itself has to name the mirror:
+#
+#   helm install kserve-llmisvc charts/kserve-llmisvc-openshift \
+#     -n kserve --create-namespace \
+#     -f charts/kserve-llmisvc-openshift/values-mirror.yaml
+#
+# Replace REGISTRY.EXAMPLE.COM with your mirror. Both images keep their tag
+# derived from kserve.version, so only the registry/path changes here.
+#
+# NOTE: this covers the two images the chart references. It does NOT cover the
+# vLLM and llm-d images baked into the LLMInferenceServiceConfig presets --
+# those are hardcoded in kserve-runtime-configs and are not overridable by any
+# value, so they can only be redirected by an ImageDigestMirrorSet. See README,
+# "Images that cannot be rewritten by values".
+# ---------------------------------------------------------------------------
+kserve-llmisvc-resources:
+  kserve:
+    llmisvc:
+      controller:
+        image: REGISTRY.EXAMPLE.COM/kserve/llmisvc-controller
+        # Uncomment if the mirror needs credentials. The secret must already
+        # exist in the release namespace.
+        # imagePullSecrets:
+        #   - name: mirror-pull-secret
+    storage:
+      image: REGISTRY.EXAMPLE.COM/kserve/storage-initializer

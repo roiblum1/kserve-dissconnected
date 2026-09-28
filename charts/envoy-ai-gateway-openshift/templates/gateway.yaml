@@ -1,0 +1,92 @@
+{{- include "envoy-ai-gateway-openshift.validate" . }}
+{{- if .Values.gateway.enabled }}
+{{- $gwNs := include "envoy-ai-gateway-openshift.gatewayNamespace" . }}
+{{- $svc := .Values.gateway.envoyProxy.service }}
+{{- $wave := dig "syncWave" dict (.Values.argocd | default dict) }}
+{{- if .Values.gateway.envoyProxy.create }}
+#
+# Data-plane shape for every Gateway in this GatewayClass.
+#
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: {{ .Values.gateway.name }}
+  namespace: {{ .Release.Namespace }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave.envoyProxy) | nindent 2 }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        # Pins the generated Service name so the Route has a stable target.
+        name: {{ $svc.name }}
+        type: {{ $svc.type }}
+        {{- with $svc.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $svc.loadBalancerIP }}
+        loadBalancerIP: {{ . | quote }}
+        {{- end }}
+        {{- with $svc.loadBalancerClass }}
+        loadBalancerClass: {{ . | quote }}
+        {{- end }}
+        {{- with $svc.loadBalancerSourceRanges }}
+        loadBalancerSourceRanges:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $svc.externalTrafficPolicy }}
+        externalTrafficPolicy: {{ . }}
+        {{- end }}
+        {{- if not (kindIs "invalid" $svc.allocateLoadBalancerNodePorts) }}
+        allocateLoadBalancerNodePorts: {{ $svc.allocateLoadBalancerNodePorts }}
+        {{- end }}
+      envoyDeployment:
+        replicas: {{ .Values.gateway.envoyProxy.replicas }}
+        container:
+          resources:
+            {{- toYaml .Values.gateway.envoyProxy.resources | nindent 12 }}
+---
+{{- end }}
+{{- if .Values.gateway.gatewayClass.create }}
+#
+# Cluster-scoped, additive. Uninstalling this release removes only this
+# GatewayClass; no other GatewayClass is touched.
+#
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ .Values.gateway.gatewayClass.name }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave.gatewayClass) | nindent 2 }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+spec:
+  controllerName: {{ .Values.gateway.gatewayClass.controllerName }}
+  {{- if .Values.gateway.envoyProxy.create }}
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: {{ .Values.gateway.name }}
+    namespace: {{ .Release.Namespace }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.gateway.name }}
+  namespace: {{ $gwNs }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave.gateway) | nindent 2 }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+spec:
+  gatewayClassName: {{ .Values.gateway.gatewayClass.name }}
+  listeners:
+    - name: {{ .Values.gateway.listener.name }}
+      port: {{ .Values.gateway.listener.port }}
+      protocol: {{ .Values.gateway.listener.protocol }}
+      allowedRoutes:
+        {{- toYaml .Values.gateway.listener.allowedRoutes | nindent 8 }}
+{{- end }}

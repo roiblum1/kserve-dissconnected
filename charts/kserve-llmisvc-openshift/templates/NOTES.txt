@@ -1,0 +1,27 @@
+{{- $sub := index .Values "kserve-llmisvc-resources" }}
+{{- $gw := $sub.kserve.controller.gateway.ingressGateway.kserveGateway }}
+KServe LLMInferenceService {{ .Chart.AppVersion }} installed as release {{ .Release.Name }} in {{ .Release.Namespace }}.
+
+Verify the controller:
+
+  oc rollout status deploy/llmisvc-controller-manager -n {{ .Release.Namespace }}
+  oc get pods -n {{ .Release.Namespace }} \
+    -o custom-columns='NAME:.metadata.name,SCC:.metadata.annotations.openshift\.io/scc'
+
+The webhook certificate is issued by cert-manager from the self-signed Issuer
+in this namespace. If the pod never goes Ready, check it first:
+
+  oc get certificate llmisvc-serving-cert -n {{ .Release.Namespace }}
+
+LLMInferenceService HTTPRoutes will attach to Gateway {{ $gw }}.
+That listener must accept routes from the model's namespace:
+
+  oc get gateway {{ (splitList "/" $gw) | last }} -n {{ (splitList "/" $gw) | first }} \
+    -o jsonpath='{.spec.listeners[*].allowedRoutes.namespaces.from}{"\n"}'
+
+`Same` will not work for models outside {{ (splitList "/" $gw) | first }} -- reinstall the AI
+Gateway chart with -f charts/envoy-ai-gateway-openshift/values-kserve.yaml.
+
+Next: install charts/kserve-runtime-configs-openshift, which supplies the
+LLMInferenceServiceConfig presets that an LLMInferenceService refers to through
+spec.baseRefs. Without them only fully inline specs work.

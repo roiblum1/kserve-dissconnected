@@ -1,0 +1,73 @@
+# ---------------------------------------------------------------------------
+# LoadBalancer overlay for envoy-ai-gateway-openshift.
+#
+# Use this on a cluster that HAS a load-balancer provider (a cloud platform, or
+# MetalLB / an F5 / a hardware LB on bare metal). Confirm first:
+#
+#   oc get infrastructure cluster -o jsonpath='{.status.platform}{"\n"}'
+#   oc get ns | grep -i metallb
+#
+# A platform of "None" with no MetalLB means LoadBalancer Services never get an
+# address -- stay on the ClusterIP + Route default in values.yaml.
+#
+#   helm upgrade --install envoy-ai-gateway charts/envoy-ai-gateway-openshift \
+#     -n envoy-ai-gateway-system --create-namespace \
+#     -f charts/envoy-ai-gateway-openshift/values.yaml \
+#     -f charts/envoy-ai-gateway-openshift/values-loadbalancer.yaml
+# ---------------------------------------------------------------------------
+gateway:
+  envoyProxy:
+    service:
+      type: LoadBalancer
+
+      # Preserves the real client IP, at the cost of only routing to nodes that
+      # run an Envoy pod. Raise envoyProxy.replicas (or add a
+      # topologySpreadConstraint) before using this in production, or some
+      # nodes will blackhole traffic.
+      #
+      # Remove this line to fall back to Kubernetes' "Cluster" default, which
+      # spreads traffic across all nodes but SNATs the source IP.
+      externalTrafficPolicy: Local
+
+      # --- Provider-specific: uncomment what applies -------------------------
+
+      # MetalLB: pick a pool, or request a specific address.
+      # annotations:
+      #   metallb.universe.tf/address-pool: production
+      # loadBalancerIP: "10.0.0.50"
+
+      # AWS: network load balancer, internal scheme.
+      # annotations:
+      #   service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+      #   service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+
+      # Azure internal LB.
+      # annotations:
+      #   service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+
+      # Restrict who can reach the LB. Strongly recommended for an AI gateway
+      # that fronts paid model APIs.
+      # loadBalancerSourceRanges:
+      #   - 10.0.0.0/8
+      #   - 192.168.0.0/16
+
+      # Some providers do not need the NodePorts Kubernetes allocates by
+      # default for LoadBalancer Services.
+      # allocateLoadBalancerNodePorts: false
+
+  # With a LoadBalancer the Route is usually redundant: clients hit the LB
+  # address directly. Set create: true if you also want an OpenShift hostname
+  # (for example to reuse the cluster's wildcard certificate).
+  route:
+    create: false
+
+  # A LoadBalancer normally fronts HTTPS. Switching the listener to 443 means
+  # adding protocol: HTTPS plus a certificateRef to gateway.listener, and
+  # terminating TLS at Envoy rather than at the OpenShift router.
+  #
+  # Envoy Gateway shifts listener ports below 1024 by +10000, so 443 is served
+  # on container port 10443.
+  # listener:
+  #   name: https
+  #   port: 443
+  #   protocol: HTTPS

@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# Disconnected / mirrored-registry overlay for lws-openshift.
+#
+# You probably do NOT need this file. If you mirrored with `oc mirror` and
+# mirror-config.yaml, oc-mirror emits an ImageDigestMirrorSet that redirects
+# registry.k8s.io/lws/lws to your mirror for every pod on the cluster, with no
+# chart change at all.
+#
+# Use this only when pulls are not redirected cluster-wide and the image
+# reference itself has to name the mirror:
+#
+#   helm install lws charts/lws-openshift \
+#     -n lws-system --create-namespace --skip-crds \
+#     -f charts/lws-openshift/values-mirror.yaml
+#
+# Replace REGISTRY.EXAMPLE.COM with your mirror.
+# ---------------------------------------------------------------------------
+lws:
+  image:
+    manager:
+      repository: REGISTRY.EXAMPLE.COM/lws/lws
+      tag: v0.10.0
+
+  # Uncomment if the mirror needs credentials. The secret must already exist in
+  # the release namespace.
+  # imagePullSecrets:
+  #   - name: mirror-pull-secret

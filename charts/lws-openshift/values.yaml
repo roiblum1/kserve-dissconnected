@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------------------
+# lws-openshift
+#
+# `openshift:` is added by this wrapper chart.
+# `lws:` is passed straight through to the upstream `lws` v0.10.0 subchart.
+#
+# This chart overrides ZERO upstream values. Everything under `lws:` below is
+# upstream's own default, repeated only so the knobs you are most likely to
+# reach for are visible without extracting the subchart. Deleting any of them
+# changes nothing.
+# ---------------------------------------------------------------------------
+
+openshift:
+  securityContextConstraints:
+    # Not needed: upstream's pod security context is `runAsNonRoot: true` with
+    # no runAsUser, so restricted-v2 assigns a UID from the namespace range and
+    # admission passes. Verified on OpenShift 4.22 -- see README, "Which SCC
+    # each pod lands on".
+    enabled: false
+    name: nonroot-v2
+    bindNamespaceServiceAccounts: true
+    extraServiceAccounts: []
+
+# ---------------------------------------------------------------------------
+# Upstream lws values -- all at their upstream defaults.
+# ---------------------------------------------------------------------------
+lws:
+  image:
+    manager:
+      # Already fully qualified and tag-pinned upstream, so a mirrored install
+      # needs no override here: oc-mirror's ImageDigestMirrorSet redirects
+      # registry.k8s.io/lws/lws cluster-wide. values-mirror.yaml is only for
+      # mirrors without an IDMS.
+      repository: registry.k8s.io/lws/lws
+      tag: v0.10.0
+      pullPolicy: IfNotPresent
+
+  # false makes LWS generate and rotate its own webhook serving certificate
+  # into the lws-webhook-server-cert Secret. Left at upstream's default even
+  # though cert-manager is present on this cluster, so LWS has one less thing
+  # to depend on at startup.
+  enableCertManager: false
+
+  # OpenShift's monitoring stack does not scrape this by default; enabling it
+  # also creates a ServiceMonitor, which needs the Prometheus Operator CRDs.
+  enablePrometheus: false
+
+  # DisaggregatedSet is a separate LWS API that KServe v0.21.0 does not use.
+  enableDisaggregatedSet: false
+
+  replicaCount: 1
+
+  # Note: upstream requests a full CPU and 1Gi with no limits. Unchanged here,
+  # but worth knowing before installing on a small cluster.
+  resources:
+    requests:
+      cpu: 1
+      memory: 1Gi

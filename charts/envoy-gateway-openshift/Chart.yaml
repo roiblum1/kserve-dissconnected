@@ -1,0 +1,25 @@
+apiVersion: v2
+name: envoy-gateway-openshift
+description: >-
+  Envoy Gateway control plane packaged for OpenShift. Wraps the upstream
+  gateway-helm chart, adds the SecurityContextConstraints binding the upstream
+  chart needs to schedule on OpenShift, and pins every image so the stack can be
+  mirrored into a disconnected registry.
+type: application
+version: 0.1.0
+appVersion: "v1.9.1"
+home: https://gateway.envoyproxy.io/
+sources:
+  - https://github.com/envoyproxy/gateway
+keywords:
+  - envoy
+  - envoy-gateway
+  - gateway-api
+  - openshift
+maintainers:
+  - name: platform-team
+dependencies:
+  - name: gateway-helm
+    alias: envoy-gateway
+    version: v1.9.1
+    repository: oci://docker.io/envoyproxy

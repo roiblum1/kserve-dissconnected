@@ -1,0 +1,27 @@
+LeaderWorkerSet {{ .Chart.AppVersion }} installed as release {{ .Release.Name }} in {{ .Release.Namespace }}.
+
+Verify the controller:
+
+  oc rollout status deploy/lws-controller-manager -n {{ .Release.Namespace }}
+  oc get pods -n {{ .Release.Namespace }} \
+    -o custom-columns='NAME:.metadata.name,SCC:.metadata.annotations.openshift\.io/scc'
+
+{{ if .Values.openshift.securityContextConstraints.enabled -}}
+The SCC RoleBinding for {{ .Values.openshift.securityContextConstraints.name }} was created as a pre-install hook.
+{{- else -}}
+No SCC RoleBinding was created: upstream's pod security context works under
+restricted-v2. If the pod is stuck Pending with an SCC admission error, set
+openshift.securityContextConstraints.enabled=true.
+{{- end }}
+
+CRDs are NOT installed by this chart -- run hack/install-crds.sh, and install
+this chart with --skip-crds so Helm does not re-apply the subchart's copy:
+
+  helm install {{ .Release.Name }} charts/lws-openshift \
+    -n {{ .Release.Namespace }} --create-namespace --skip-crds
+
+  oc get crd leaderworkersets.leaderworkerset.x-k8s.io
+
+Next: install KServe's LLMInferenceService controller
+(charts/kserve-llmisvc-openshift), which uses LeaderWorkerSet for multi-node
+model serving.

@@ -1,0 +1,84 @@
+# ---------------------------------------------------------------------------
+# Argo CD Application: LeaderWorkerSet.
+#
+# Sync wave 0, in parallel with Envoy Gateway: LWS shares nothing with the
+# gateways. It only has to be in place before KServe's llmisvc controller at
+# wave 20, which uses LeaderWorkerSet for multi-node model serving.
+#
+# Before applying: set repoURL, targetRevision and metadata.namespace.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: lws
+  namespace: openshift-gitops          # `argocd` on upstream Argo CD
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/your-org/envoy-ai.git
+    targetRevision: main
+    path: charts/lws-openshift
+    helm:
+      # Must stay `lws`. This chart overrides nothing, so every object name
+      # comes from upstream's `lws.fullname`, which is release-name derived:
+      # a different release name renames the controller Deployment, and
+      # app.kubernetes.io/name is part of its immutable selector.
+      releaseName: lws
+
+      # THE IMPORTANT LINE IN THIS FILE.
+      #
+      # The upstream lws chart ships its 3 CRDs in crds/ with no condition to
+      # gate them, and Argo CD renders with --include-crds by default. Without
+      # this, syncing this Application applies CRDs that crds/ already owns at
+      # wave -10 -- harmless at the same version, but at a different version
+      # the two fight, and the CRD schemas then track whichever synced last.
+      # This is the declarative equivalent of the documented `--skip-crds`.
+      skipCrds: true
+
+      valueFiles:
+        - values.yaml
+        # - values-mirror.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: lws-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 20s
+        factor: 2
+        maxDuration: 3m
+
+  ignoreDifferences:
+    # The chart renders `lws-webhook-server-cert` as an empty Secret and the
+    # controller's internal cert rotator fills it in, then patches the caBundle
+    # into both webhook configurations. Argo CD's three-way diff normally
+    # ignores live fields that the desired manifest never mentions, so this is
+    # belt-and-braces -- but if it ever does surface, the symptom is an
+    # Application that is permanently OutOfSync and, with selfHeal on, a
+    # controller and Argo CD taking turns overwriting the webhook keypair.
+    - group: ""
+      kind: Secret
+      name: lws-webhook-server-cert
+      jsonPointers:
+        - /data
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle

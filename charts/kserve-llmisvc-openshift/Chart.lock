@@ -1,0 +1,6 @@
+dependencies:
+- name: kserve-llmisvc-resources
+  repository: oci://ghcr.io/kserve/charts
+  version: v0.21.0-rc1
+digest: sha256:9f5890cb99b10ac22705b43fcff38ccead9717d189d371dcec7c23be4e7ff279
+generated: "2026-09-28T18:06:03.525739+03:00"

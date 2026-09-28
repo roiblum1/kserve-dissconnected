@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# charts/envoy-ai-gateway-openshift/values-argocd.yaml
+#
+# REQUIRED when this chart is deployed by Argo CD. Referenced from
+# argocd/application.yaml; not needed for a plain `helm install`.
+#
+# One value, and it fixes a real defect rather than a preference.
+#
+# By default the upstream chart mints its own self-signed webhook certificate
+# inside the template:
+#
+#   $existing := lookup "v1" "Secret" .Release.Namespace ...tlsCertSecretName
+#   {{- if $existing }} reuse it {{- else }} genCA / genSignedCert {{- end }}
+#
+# The `lookup` is what keeps `helm upgrade` from rotating the cert. It only
+# works when Helm has a live cluster connection. Argo CD renders manifests in
+# the repo-server, which has none, so `lookup` returns nil on EVERY render and
+# a brand-new CA and key are generated each time. Measured: two consecutive
+# `helm template` runs of this chart differ, and only in that Secret.
+#
+# The consequences under Argo CD are concrete: the Application is permanently
+# OutOfSync, and with selfHeal enabled it rewrites the webhook keypair on every
+# sync, roughly every three minutes.
+#
+# cert-manager issues the same self-signed certificate from a real controller
+# instead, so the rendered manifests become deterministic (verified: the Secret
+# disappears from the render, a Certificate and a selfSigned Issuer replace it,
+# and two renders are byte-identical). cert-manager is already a hard
+# prerequisite of this stack for KServe's llmisvc webhook, so this adds no new
+# dependency -- it only moves the requirement one Application earlier, to
+# wave 10.
+# ---------------------------------------------------------------------------
+ai-gateway:
+  controller:
+    mutatingWebhook:
+      certManager:
+        # OVERRIDE (upstream: false).
+        enable: true
+        # Upstream defaults, restated so the objects this creates are visible:
+        # a selfSigned Issuer and a Certificate, both in the release namespace,
+        # writing into the Secret the controller Deployment already mounts.
+        issuerName: self-signed-issuer-for-mutating-webhook
+        certificateName: self-signed-cert-for-mutating-webhook

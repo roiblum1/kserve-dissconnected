@@ -1,0 +1,41 @@
+{{- if and .Values.gateway.enabled .Values.gateway.route.create }}
+#
+# Exposes the Envoy data plane through OpenShift ingress.
+#
+# The target is the Service that Envoy Gateway generates, pinned to a fixed
+# name via EnvoyProxy `.spec.provider.kubernetes.envoyService.name`. It lives in
+# the Envoy Gateway namespace because that is where Envoy Gateway places the
+# data-plane pods (default mode, i.e. not gatewayNamespaceMode).
+#
+# `port.targetPort` names the Service port. It must NOT be the Service port
+# number: an OpenShift Route resolves targetPort against the pods' target port
+# or the port name, so `targetPort: 80` returns 503 from the router while the
+# Service answers 200 in-cluster.
+#
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ .Values.gateway.route.name }}
+  namespace: {{ .Values.gateway.envoyGatewayNamespace }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+  {{- $wave := dig "syncWave" dict (.Values.argocd | default dict) }}
+  {{- include "envoy-ai-gateway-openshift.annotations"
+        (dict "wave" $wave.route "extra" .Values.gateway.route.annotations) | nindent 2 }}
+spec:
+  {{- with .Values.gateway.route.host }}
+  host: {{ . }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ .Values.gateway.envoyProxy.service.name }}
+    weight: 100
+  port:
+    targetPort: {{ .Values.gateway.route.targetPort | default (printf "%s-%v" (lower .Values.gateway.listener.protocol) .Values.gateway.listener.port) }}
+  {{- if .Values.gateway.route.tls.enabled }}
+  tls:
+    termination: {{ .Values.gateway.route.tls.termination }}
+    insecureEdgeTerminationPolicy: {{ .Values.gateway.route.tls.insecureEdgeTerminationPolicy }}
+  {{- end }}
+  wildcardPolicy: None
+{{- end }}

@@ -1,0 +1,67 @@
+{{- include "envoy-gateway-openshift.validate" . }}
+{{- if .Values.openshift.securityContextConstraints.enabled }}
+{{- $scc := .Values.openshift.securityContextConstraints }}
+{{- if not (or $scc.bindNamespaceServiceAccounts $scc.extraServiceAccounts) }}
+{{- fail "openshift.securityContextConstraints is enabled but neither bindNamespaceServiceAccounts nor extraServiceAccounts is set; pods would fail SCC admission" }}
+{{- end }}
+#
+# Grants `use` on the {{ $scc.name }} SecurityContextConstraints to workloads in
+# this namespace. This is a namespace-scoped RoleBinding referencing the
+# cluster-wide role OpenShift auto-generates for every SCC, so it confers no
+# permission outside {{ .Release.Namespace }}.
+#
+# This must be a pre-install/pre-upgrade hook, not an ordinary manifest.
+# The upstream chart's certgen Job is itself a `helm.sh/hook: pre-install`
+# resource, and Helm runs every pre-install hook before any ordinary manifest.
+# As a plain resource this binding would be created too late and certgen would
+# fail admission with:
+#
+#   pods "envoy-gateway-certgen-" is forbidden: unable to validate against any
+#   security context constraint: ... provider "nonroot-v2": Forbidden: not
+#   usable by user or serviceaccount
+#
+# The negative hook-weight orders it ahead of certgen (which has no weight, so 0).
+#
+# Trade-off: hook resources are not tracked in the release, so `helm uninstall`
+# leaves this RoleBinding behind. Deleting the namespace removes it, and
+# re-installing replaces it via the before-hook-creation policy. It is NOT
+# deleted on hook-succeeded, because the controller and the Envoy data-plane
+# pods need it for the whole life of the release.
+#
+#
+# Under Argo CD this needs no argocd.argoproj.io annotations of its own. Argo CD
+# translates Helm hooks natively: `pre-install,pre-upgrade` becomes PreSync and
+# `helm.sh/hook-weight` becomes the sync wave, so the -5 below still orders this
+# ahead of everything at 0. Upstream gateway-helm relies on the same mapping --
+# its certgen RBAC carries the comment "Ensure rbac is created before the
+# certgen job when using ArgoCD or Flux". Do not add a second, hand-written
+# sync-wave annotation here: it would be a duplicate of the hook weight that
+# could silently drift from it.
+#
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "envoy-gateway-openshift.fullname" . }}-scc-{{ $scc.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "envoy-gateway-openshift.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:{{ $scc.name }}
+subjects:
+{{- if $scc.bindNamespaceServiceAccounts }}
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: system:serviceaccounts:{{ .Release.Namespace }}
+{{- end }}
+{{- range $scc.extraServiceAccounts }}
+  - kind: ServiceAccount
+    name: {{ . }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

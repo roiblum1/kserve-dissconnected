@@ -1,0 +1,106 @@
+# ---------------------------------------------------------------------------
+# kserve-llmisvc-openshift
+#
+# `openshift:` is added by this wrapper chart. `kserve-llmisvc-resources:` is
+# passed straight through to the upstream kserve-llmisvc-resources v0.21.0-rc1
+# subchart.
+#
+# Five upstream values are overridden; each is marked OVERRIDE with the reason.
+# Everything else is upstream's own default. See README, "Delta from the
+# upstream charts".
+# ---------------------------------------------------------------------------
+
+openshift:
+  securityContextConstraints:
+    # Required. The upstream controller pod sets `runAsUser: 1000`, and
+    # OpenShift's default restricted-v2 SCC is MustRunAsRange: on this cluster
+    # the namespace range starts at 1000980000, so 1000 is rejected outright.
+    # nonroot-v2 is MustRunAsNonRoot, which accepts any non-zero UID, so it is
+    # the least-privilege SCC that admits the pod unmodified.
+    #
+    # The alternative -- deleting runAsUser so restricted-v2 assigns a UID --
+    # would fork the upstream pod spec. Binding an SCC does not.
+    enabled: true
+    name: nonroot-v2
+    bindNamespaceServiceAccounts: true
+    extraServiceAccounts: []
+
+  # The llminferenceservices CRD hardcodes its conversion-webhook clientConfig
+  # to `namespace: kserve` and its CA injection to `kserve/llmisvc-serving-cert`
+  # -- neither is templated by the upstream CRD chart. Installing the controller
+  # anywhere else leaves the CRD's conversion webhook pointing at a Service that
+  # does not exist, and every read of an LLMInferenceService fails.
+  #
+  # Set to "" to skip the check if upstream ever templates that namespace.
+  enforceNamespace: kserve
+
+# ---------------------------------------------------------------------------
+# Upstream kserve-llmisvc-resources values
+# ---------------------------------------------------------------------------
+kserve-llmisvc-resources:
+  kserve:
+    # true is correct here: this release owns the shared inferenceservice-config
+    # ConfigMap and the `default` ClusterStorageContainer, because the main
+    # kserve-resources chart is not installed. Set false only when adding
+    # LLMInferenceService to an existing KServe install.
+    createSharedResources: true
+
+    llmisvc:
+      # OVERRIDE 1 (upstream: true).
+      #
+      # true renders four cluster-scoped CRDs into templates/:
+      #   inferencepools.inference.networking.k8s.io      Gateway API
+      #   inferencepools.inference.networking.x-k8s.io    Inference Extension
+      #   inferenceobjectives.llm-d.ai
+      #   inferencemodelrewrites.llm-d.ai
+      #
+      # Because they land in templates/ and not crds/, Helm owns them:
+      # `helm uninstall` DELETES them, and with them every InferencePool on the
+      # cluster, including other tenants'. hack/install-crds.sh applies the same
+      # four CRDs, rendered from this same chart version, out of band instead.
+      createGIECRDs: false
+
+      controller:
+        # OVERRIDE 2 (upstream: `kserve/llmisvc-controller`).
+        #
+        # Fully qualified. An unqualified name is resolved by CRI-O's
+        # unqualified-search-registries, so in a disconnected cluster the
+        # ImageDigestMirrorSet for docker.io/kserve/* only applies if docker.io
+        # happens to still be in that list. Naming the registry removes the
+        # dependency on node configuration. The tag stays derived from
+        # kserve.version, so a version bump is still a one-line change.
+        image: docker.io/kserve/llmisvc-controller
+
+        # OVERRIDE 3 (upstream: Always).
+        #
+        # Always re-pulls on every pod start. In a disconnected cluster that
+        # turns a brief mirror outage into a controller that cannot restart,
+        # even though the image is already on the node.
+        imagePullPolicy: IfNotPresent
+
+    storage:
+      # OVERRIDE 4 (upstream: `kserve/storage-initializer`). Same reason as
+      # OVERRIDE 2. This is the image in the `default` ClusterStorageContainer,
+      # which fetches model weights.
+      image: docker.io/kserve/storage-initializer
+
+    controller:
+      gateway:
+        ingressGateway:
+          # OVERRIDE 5 (upstream: `kserve/kserve-ingress-gateway`).
+          #
+          # The Gateway that every HTTPRoute the llmisvc controller creates uses
+          # as its parentRef, written as <namespace>/<name>. Pointed at the
+          # Gateway charts/envoy-ai-gateway-openshift already created, so model
+          # traffic reuses the Envoy data plane, Service and Route that are
+          # in place rather than standing up a second one.
+          #
+          # That listener must accept routes from the model's namespace. The AI
+          # Gateway chart ships `allowedRoutes.namespaces.from: Same`; install
+          # it with -f charts/envoy-ai-gateway-openshift/values-kserve.yaml to
+          # widen it to All.
+          #
+          # Set this back to kserve/kserve-ingress-gateway, and create that
+          # Gateway yourself, if you would rather KServe own a separate data
+          # plane.
+          kserveGateway: envoy-ai-gateway-system/envoy-ai-gateway

@@ -1,0 +1,29 @@
+{{- if .Values.openshift.securityContextConstraints.enabled }}
+{{- $scc := .Values.openshift.securityContextConstraints }}
+{{- if not (or $scc.bindNamespaceServiceAccounts $scc.extraServiceAccounts) }}
+{{- fail "openshift.securityContextConstraints is enabled but neither bindNamespaceServiceAccounts nor extraServiceAccounts is set; the controller would fail SCC admission" }}
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "envoy-ai-gateway-openshift.fullname" . }}-scc-{{ $scc.name }}
+  namespace: {{ .Release.Namespace }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" (dig "syncWave" "sccRoleBinding" "" (.Values.argocd | default dict))) | nindent 2 }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:{{ $scc.name }}
+subjects:
+{{- if $scc.bindNamespaceServiceAccounts }}
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: system:serviceaccounts:{{ .Release.Namespace }}
+{{- end }}
+{{- range $scc.extraServiceAccounts }}
+  - kind: ServiceAccount
+    name: {{ . }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

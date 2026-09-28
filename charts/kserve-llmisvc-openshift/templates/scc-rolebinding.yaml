@@ -1,0 +1,68 @@
+{{- include "kserve-llmisvc-openshift.validate" . }}
+{{- if .Values.openshift.securityContextConstraints.enabled }}
+{{- $scc := .Values.openshift.securityContextConstraints }}
+{{- if not (or $scc.bindNamespaceServiceAccounts $scc.extraServiceAccounts) }}
+{{- fail "openshift.securityContextConstraints is enabled but neither bindNamespaceServiceAccounts nor extraServiceAccounts is set; pods would fail SCC admission" }}
+{{- end }}
+#
+# Grants `use` on the {{ $scc.name }} SecurityContextConstraints to workloads in
+# this namespace, via the cluster-wide role OpenShift auto-generates for every
+# SCC. Namespace-scoped, so it confers nothing outside {{ .Release.Namespace }}.
+#
+# The upstream controller pod requests UID 1000, which restricted-v2
+# (MustRunAsRange) rejects:
+#
+#   pods "llmisvc-controller-manager-..." is forbidden: unable to validate
+#   against any security context constraint: ... provider restricted-v2:
+#   .containers[0].runAsUser: Invalid value: 1000: must be in the ranges:
+#   [1000980000, 1000989999]
+#
+# Kept as a pre-install hook, and ordered ahead of everything, for symmetry
+# with the other charts in this repo. This chart ships no hooks of its own, so
+# an ordinary manifest would also work -- the Deployment's ReplicaSet retries
+# admission until the binding exists -- but the hook makes the pod Ready on the
+# first attempt instead of after a backoff.
+#
+# Trade-off: hook resources are not tracked in the release, so `helm uninstall`
+# leaves this RoleBinding behind. Deleting the namespace removes it, and
+# re-installing replaces it via the before-hook-creation policy. It is NOT
+# deleted on hook-succeeded, because the controller needs it for the whole life
+# of the release.
+#
+#
+# Under Argo CD this needs no argocd.argoproj.io annotations of its own. Argo CD
+# translates Helm hooks natively: `pre-install,pre-upgrade` becomes PreSync and
+# `helm.sh/hook-weight` becomes the sync wave, so the -5 below still orders this
+# ahead of everything at 0. Upstream gateway-helm relies on the same mapping --
+# its certgen RBAC carries the comment "Ensure rbac is created before the
+# certgen job when using ArgoCD or Flux". Do not add a second, hand-written
+# sync-wave annotation here: it would be a duplicate of the hook weight that
+# could silently drift from it.
+#
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kserve-llmisvc-openshift.fullname" . }}-scc-{{ $scc.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kserve-llmisvc-openshift.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:{{ $scc.name }}
+subjects:
+{{- if $scc.bindNamespaceServiceAccounts }}
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: system:serviceaccounts:{{ .Release.Namespace }}
+{{- end }}
+{{- range $scc.extraServiceAccounts }}
+  - kind: ServiceAccount
+    name: {{ . }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

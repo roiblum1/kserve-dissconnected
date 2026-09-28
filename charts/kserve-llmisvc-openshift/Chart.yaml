@@ -1,0 +1,34 @@
+apiVersion: v2
+name: kserve-llmisvc-openshift
+description: >-
+  KServe's LLMInferenceService controller packaged for OpenShift. Wraps the
+  upstream kserve-llmisvc-resources chart, adds the SecurityContextConstraints
+  binding the controller needs, and keeps the cluster-scoped CRDs out of the
+  release so `helm uninstall` cannot take other tenants' custom resources with
+  it.
+type: application
+version: 0.1.0
+appVersion: "v0.21.0-rc1"
+home: https://kserve.github.io/website/
+sources:
+  - https://github.com/kserve/kserve
+keywords:
+  - kserve
+  - llminferenceservice
+  - llm-d
+  - generative-ai
+  - openshift
+maintainers:
+  - name: platform-team
+dependencies:
+  # Upstream chart, vendored byte-identical under charts/. Already lowercase and
+  # DNS-safe, so no alias: `.Chart.Name` stays at upstream's value, and with it
+  # app.kubernetes.io/name, which is part of the immutable Deployment selector.
+  #
+  # v0.21.0-rc1 IS KServe v0.21.0. The v0.21.0 GitHub release ships its chart
+  # tarballs still labelled -rc1 and ghcr.io has no v0.21.0 tag at all; the
+  # -rc1 artifacts on ghcr.io are byte-identical to the ones attached to the
+  # v0.21.0 release. See UPGRADE.md, "KServe version labels".
+  - name: kserve-llmisvc-resources
+    version: v0.21.0-rc1
+    repository: oci://ghcr.io/kserve/charts

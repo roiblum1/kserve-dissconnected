@@ -1,0 +1,232 @@
+# ---------------------------------------------------------------------------
+# envoy-ai-gateway-openshift
+#
+# `openshift:` and `gateway:` are added by this wrapper chart.
+# `ai-gateway:` is passed straight through to the upstream `ai-gateway-helm`
+# v1.1.0 subchart.
+# ---------------------------------------------------------------------------
+
+openshift:
+  securityContextConstraints:
+    # The AI Gateway controller runs as UID 65532, which OpenShift's default
+    # restricted-v2 SCC rejects (MustRunAsRange). See the equivalent comment in
+    # the envoy-gateway-openshift chart for the full reasoning.
+    #
+    # This binding covers the controller in THIS namespace. The ext_proc
+    # sidecar that the mutating webhook injects runs inside the Envoy
+    # data-plane pods in the Envoy Gateway namespace, and is covered by the
+    # binding that the envoy-gateway-openshift chart creates there.
+    enabled: true
+    name: nonroot-v2
+    bindNamespaceServiceAccounts: true
+    extraServiceAccounts: []
+
+# ---------------------------------------------------------------------------
+# Argo CD
+#
+# Only sync waves, and only for the resources THIS wrapper chart adds -- the
+# upstream subchart's resources cannot be annotated without forking its
+# templates, and do not need to be: they all belong in wave 0.
+#
+# Helm ignores these annotations completely, so a plain `helm install` behaves
+# exactly as before. Under Argo CD the numbers are relative, not absolute; only
+# their order matters. See argocd/application.yaml for the wave this whole
+# Application sits at, and README, "Deploying with Argo CD", for the table.
+# ---------------------------------------------------------------------------
+argocd:
+  syncWave:
+    # Before anything that schedules a pod, so the controller passes SCC
+    # admission on its first attempt rather than after a ReplicaSet backoff.
+    # Unlike the other charts here this is NOT a Helm hook, because the
+    # upstream ai-gateway chart has no hooks of its own to be ordered against;
+    # an ordinary resource in an earlier wave is the better Argo CD shape,
+    # since hook resources are deleted and recreated on every sync.
+    sccRoleBinding: "-5"
+
+    # Wave 0 alongside the upstream controller Deployment: the GatewayClass
+    # references it via parametersRef, and Envoy Gateway reads it when it
+    # programs the Gateway.
+    envoyProxy: "0"
+
+    # After wave 0 is healthy, i.e. after the AI Gateway controller is Ready.
+    gatewayClass: "1"
+
+    # THIS IS WHY THE MANUAL `oc rollout restart deployment/envoy-gateway`
+    # STEP DISAPPEARS UNDER ARGO CD.
+    #
+    # Envoy Gateway dials the AI Gateway extension server lazily -- the
+    # connection is made the first time an xDS translation hook is needed,
+    # which is the first time it programs a Gateway. With Helm the Gateway and
+    # the controller are applied in the same pass, so Envoy Gateway can reach
+    # that point before the extension server exists and the restart is what
+    # makes it retry. Here the Gateway is not created until wave 1 is healthy,
+    # so the extension server is already up the first time Envoy Gateway needs
+    # it. See README, "Deploying with Argo CD".
+    gateway: "2"
+
+    # Last: it targets the Service Envoy Gateway creates in response to the
+    # Gateway. Creating it earlier is harmless -- an OpenShift Route may point
+    # at a Service that does not exist yet, it just answers 503 -- so this is
+    # ordering for legibility, not correctness.
+    route: "3"
+
+# ---------------------------------------------------------------------------
+# Gateway wiring
+#
+# Optional. Set enabled=false to install only the AI Gateway control plane and
+# bring your own GatewayClass/Gateway.
+# ---------------------------------------------------------------------------
+gateway:
+  enabled: true
+
+  # Cluster-scoped. Additive: it does not touch any existing GatewayClass.
+  gatewayClass:
+    create: true
+    name: envoy-ai-gateway
+    controllerName: gateway.envoyproxy.io/gatewayclass-controller
+
+  name: envoy-ai-gateway
+  # Namespace for the Gateway itself. Empty means the release namespace.
+  namespace: ""
+
+  # Namespace where Envoy Gateway runs. Envoy Gateway materialises the Envoy
+  # data-plane Deployment, Service and ServiceAccount here, not next to the
+  # Gateway.
+  envoyGatewayNamespace: envoy-gateway-system
+
+  listener:
+    name: http
+    # Gateway API listener port, i.e. the port on the generated Service.
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: Same
+
+  # EnvoyProxy tunes the data plane that Envoy Gateway generates for this
+  # Gateway.
+  envoyProxy:
+    create: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 1024Mi
+
+    service:
+      # Fixed name for the Service that Envoy Gateway generates for this
+      # Gateway. Without this, Envoy Gateway names it
+      # `envoy-<48-char-hash>` (derived from the Gateway's namespace/name),
+      # which cannot be referenced from a template -- so the Route would have
+      # nothing stable to point at.
+      name: envoy-ai-gateway
+
+      # ClusterIP + an OpenShift Route, or LoadBalancer.
+      #
+      # This test cluster reports platform "None" with no MetalLB, so a
+      # LoadBalancer Service would stay Pending forever and the Gateway would
+      # never report an address. On a cluster that HAS a load-balancer
+      # provider, use values-loadbalancer.yaml instead of editing this.
+      type: ClusterIP
+
+      # Only emitted when non-empty, so the defaults stay schema-valid.
+      annotations: {}
+      loadBalancerIP: ""
+      loadBalancerClass: ""
+      loadBalancerSourceRanges: []
+      # "Local" preserves the client source IP but only routes to nodes running
+      # an Envoy pod. "Cluster" (the Kubernetes default) spreads traffic but
+      # SNATs the source IP.
+      externalTrafficPolicy: ""
+      # null leaves it to Kubernetes; false suppresses NodePort allocation for
+      # LoadBalancer Services on providers that do not need them.
+      allocateLoadBalancerNodePorts: null
+
+  # OpenShift Route. Independent of the service type above -- you can front a
+  # LoadBalancer Service with a Route too, though it is usually redundant.
+  # values-loadbalancer.yaml turns this off.
+  route:
+    create: true
+    name: envoy-ai-gateway
+    host: ""
+
+    # Which Service port the Route targets. A Route's targetPort must name the
+    # Service port, or give the pods' target port -- NOT the Service port
+    # number. Pointing it at 80 yields a 503 from the router even though the
+    # Service itself answers on 80.
+    #
+    # Left empty, this is derived as Envoy Gateway names its listener ports:
+    # lower("<PROTOCOL>-<port>"), e.g. HTTP/80 -> "http-80"
+    # (internal/gatewayapi.irListenerPortName). Set it explicitly if that
+    # convention ever changes.
+    #
+    # The numeric alternative is the Envoy container port: Envoy Gateway shifts
+    # listener ports below 1024 by +10000, so 80 is served on 10080.
+    targetPort: ""
+
+    annotations: {}
+    tls:
+      enabled: true
+      termination: edge
+      insecureEdgeTerminationPolicy: Redirect
+
+# ---------------------------------------------------------------------------
+# Upstream ai-gateway-helm values
+#
+# This chart overrides ZERO upstream values and ADDS exactly one:
+# controller.mutatingWebhook.namespaceSelector. Everything else below is
+# upstream's own default, repeated only so the knobs you are most likely to
+# reach for are visible without extracting the subchart -- deleting any of them
+# changes nothing.
+#
+# Verified: `controller.image.repository` already defaults to
+# docker.io/envoyproxy/ai-gateway-controller upstream and `tag: ""` resolves to
+# the chart appVersion, so pinning either produced byte-identical output. The
+# earlier explicit pins were removed once measured.
+# ---------------------------------------------------------------------------
+ai-gateway:
+  controller:
+    image:
+      repository: docker.io/envoyproxy/ai-gateway-controller
+      tag: ""          # "" -> chart appVersion -> v1.1.0
+    replicaCount: 1
+    logLevel: info
+
+    mutatingWebhook:
+      # ADDED (absent upstream).
+      #
+      # This MutatingWebhookConfiguration is cluster-scoped, matches pod CREATE
+      # and has failurePolicy: Fail. Upstream's objectSelector (below, at its
+      # default) already narrows it to envoy-gateway-managed pods, so an outage
+      # of the AI Gateway controller blocks only Envoy data-plane pods.
+      #
+      # namespaceSelector narrows it further to the namespace this stack owns,
+      # which is what keeps a cluster-scoped Fail-policy webhook from being a
+      # shared-cluster risk at all. Remove it if you enable Envoy Gateway's
+      # gatewayNamespaceMode, which places Envoy pods in arbitrary application
+      # namespaces.
+      namespaceSelector:
+        matchExpressions:
+          - key: kubernetes.io/metadata.name
+            operator: In
+            values:
+              - envoy-gateway-system
+
+      # Upstream default, restated for context next to the addition above.
+      objectSelector:
+        matchLabels:
+          app.kubernetes.io/managed-by: envoy-gateway
+
+  extProc:
+    image:
+      repository: docker.io/envoyproxy/ai-gateway-extproc
+      tag: ""          # "" -> chart appVersion -> v1.1.0
+    logLevel: info
+
+  # Upstream default. Must match where Envoy Gateway actually runs;
+  # templates/_validate.tpl fails the render if it disagrees with
+  # gateway.envoyGatewayNamespace above.
+  envoyGateway:
+    namespace: envoy-gateway-system

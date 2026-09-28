@@ -1,0 +1,71 @@
+Envoy AI Gateway {{ .Chart.AppVersion }} is installing into namespace {{ .Release.Namespace }}.
+
+1. Wait for the controller:
+
+     oc wait --timeout=2m -n {{ .Release.Namespace }} \
+       deployment/ai-gateway-controller --for=condition=Available
+
+2. Envoy Gateway must reconnect to this controller's xDS hook. Restart it once:
+
+     oc rollout restart -n {{ .Values.gateway.envoyGatewayNamespace }} deployment/envoy-gateway
+     oc rollout status  -n {{ .Values.gateway.envoyGatewayNamespace }} deployment/envoy-gateway
+
+{{ if .Values.gateway.enabled }}
+3. Watch the Gateway become Programmed:
+
+     oc get gateway {{ .Values.gateway.name }} -n {{ include "envoy-ai-gateway-openshift.gatewayNamespace" . }} -w
+
+   The Envoy data plane appears in {{ .Values.gateway.envoyGatewayNamespace }}:
+
+     oc get pods -n {{ .Values.gateway.envoyGatewayNamespace }} \
+       -l gateway.envoyproxy.io/owning-gateway-name={{ .Values.gateway.name }}
+     oc get svc {{ .Values.gateway.envoyProxy.service.name }} -n {{ .Values.gateway.envoyGatewayNamespace }}
+
+{{- if eq .Values.gateway.envoyProxy.service.type "LoadBalancer" }}
+
+4. Service type is LoadBalancer. Wait for the external address:
+
+     oc get svc {{ .Values.gateway.envoyProxy.service.name }} -n {{ .Values.gateway.envoyGatewayNamespace }} -w
+
+   It also lands in the Gateway's status:
+
+     oc get gateway {{ .Values.gateway.name }} -n {{ include "envoy-ai-gateway-openshift.gatewayNamespace" . }} \
+       -o jsonpath='{.status.addresses}{"\n"}'
+
+   If EXTERNAL-IP stays <pending>, this cluster has no load-balancer provider.
+   Check with:
+
+     oc get infrastructure cluster -o jsonpath='{.status.platform}{"\n"}'
+
+   A platform of "None" with no MetalLB means LoadBalancer will never be
+   assigned -- switch to the ClusterIP + Route default instead.
+{{- end }}
+{{- if .Values.gateway.route.create }}
+
+{{ if eq .Values.gateway.envoyProxy.service.type "LoadBalancer" }}5{{ else }}4{{ end }}. Reach it through the Route:
+
+     oc get route {{ .Values.gateway.route.name }} -n {{ .Values.gateway.envoyGatewayNamespace }} \
+       -o jsonpath='{.spec.host}{"\n"}'
+
+   Until you create an AIGatewayRoute, that host returns 404 from Envoy -- which
+   already proves the data plane is live and reachable. A 503 instead means the
+   Service has no endpoints, i.e. the Gateway is not programmed yet.
+{{- end }}
+{{- else }}
+3. gateway.enabled=false, so no GatewayClass, Gateway or Route was created.
+   Bring your own, using controllerName {{ .Values.gateway.gatewayClass.controllerName }}.
+{{- end }}
+
+Next, either:
+  * create an AIGatewayRoute to proxy an external model provider; or
+  * install charts/lws-openshift and charts/kserve-llmisvc-openshift to serve
+    your own models with LLMInferenceService. That path needs this release
+    installed with -f values-kserve.yaml (so the listener accepts HTTPRoutes
+    from model namespaces) and the Envoy Gateway release installed with
+    -f values-inference-pool.yaml.
+{{ if ne (toString (dig "namespaces" "from" "" .Values.gateway.listener.allowedRoutes)) "All" -}}
+    This release has allowedRoutes.namespaces.from={{ dig "namespaces" "from" "?" .Values.gateway.listener.allowedRoutes }}, which will REJECT
+    KServe's HTTPRoutes. Reinstall with -f values-kserve.yaml first.
+{{ end }}
+This release does NOT manage Gateway API CRDs or AI Gateway CRDs; they are
+installed separately by hack/install-crds.sh.

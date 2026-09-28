@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# Disconnected / mirrored-registry overlay for envoy-gateway-openshift.
+#
+#   helm install envoy-gateway charts/envoy-gateway-openshift \
+#     -n envoy-gateway-system --create-namespace \
+#     -f charts/envoy-gateway-openshift/values.yaml \
+#     -f charts/envoy-gateway-openshift/values-mirror.yaml
+#
+# Replace REGISTRY.EXAMPLE.COM/envoyproxy with your mirror. Keep the digests:
+# they are the digests published on Docker Hub and verified by `skopeo copy`,
+# so pinning them proves the mirror holds the same bits.
+# ---------------------------------------------------------------------------
+envoy-gateway:
+  global:
+    # Rewrites the control-plane, certgen and ratelimit images only.
+    imageRegistry: REGISTRY.EXAMPLE.COM
+
+    # Uncomment if your mirror needs credentials. The secret must already exist
+    # in the release namespace.
+    # imagePullSecrets:
+    #   - name: mirror-pull-secret
+
+    images:
+      envoyProxy:
+        # Full reference: NOT rewritten by imageRegistry.
+        image: REGISTRY.EXAMPLE.COM/envoyproxy/envoy:distroless-v1.39.1@sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4
+
+  deployment:
+    envoyGateway:
+      image:
+        repository: REGISTRY.EXAMPLE.COM/envoyproxy/gateway
+        tag: v1.9.1
+
+  config:
+    envoyGateway:
+      provider:
+        kubernetes:
+          shutdownManager:
+            # Full reference: NOT rewritten by imageRegistry.
+            image: REGISTRY.EXAMPLE.COM/envoyproxy/gateway:v1.9.1

@@ -1,0 +1,55 @@
+Envoy Gateway {{ .Chart.AppVersion }} is installing into namespace {{ .Release.Namespace }}.
+
+1. Wait for the control plane:
+
+     oc wait --timeout=5m -n {{ .Release.Namespace }} \
+       deployment/envoy-gateway --for=condition=Available
+
+{{ if .Values.openshift.securityContextConstraints.enabled -}}
+2. SCC: workloads in {{ .Release.Namespace }} may use `{{ .Values.openshift.securityContextConstraints.name }}`.
+   Confirm a pod actually got it:
+
+     oc get pods -n {{ .Release.Namespace }} \
+       -o custom-columns='NAME:.metadata.name,SCC:.metadata.annotations.openshift\.io/scc'
+{{- else -}}
+2. SCC binding is DISABLED. Unless another SCC admits runAsUser 65532, pods will
+   stay Pending with a "unable to validate against any security context
+   constraint" event.
+{{- end }}
+
+{{- $eg := index .Values "envoy-gateway" }}
+{{ if $eg.config.envoyGateway.extensionManager -}}
+3. This release expects Envoy AI Gateway at
+   {{ $eg.config.envoyGateway.extensionManager.service.fqdn.hostname }}:{{ $eg.config.envoyGateway.extensionManager.service.fqdn.port }}
+
+   Gateways will not be fully programmed until it is running. Install the
+   envoy-ai-gateway-openshift chart next, then restart this deployment:
+
+     oc rollout restart -n {{ .Release.Namespace }} deployment/envoy-gateway
+{{- end }}
+
+Reminder: this release does NOT manage Gateway API CRDs. They are owned by the
+OpenShift cluster-ingress-operator. `helm uninstall` will not remove them, and
+nothing in templates/ modifies them.
+
+{{- $gw := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gateways.gateway.networking.k8s.io" }}
+{{- if $gw }}
+{{- $ch := dig "metadata" "annotations" "gateway.networking.k8s.io/channel" "" (toYaml $gw | fromYaml) }}
+{{- $bv := dig "metadata" "annotations" "gateway.networking.k8s.io/bundle-version" "" (toYaml $gw | fromYaml) }}
+{{- if eq $ch "experimental" }}
+
+  !! Gateway API CRDs on this cluster now report channel "{{ $ch }}" ({{ $bv }}).
+     The upstream crds/ directory was applied -- you almost certainly ran
+     install/upgrade WITHOUT --skip-crds. That overwrote a cluster-scoped,
+     operator-owned, multi-tenant resource.
+
+     Check and repair:
+       oc get co ingress -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}'
+       oc get crd gateways.gateway.networking.k8s.io --show-managed-fields \
+         -o jsonpath='{range .metadata.managedFields[*]}{.manager} {end}'
+     The cluster-ingress-operator reconciles them back; if it does not, open a
+     ticket rather than hand-editing the CRDs.
+{{- else }}
+  Verified: Gateway API is {{ $bv }} ({{ $ch }} channel), untouched by this release.
+{{- end }}
+{{- end }}

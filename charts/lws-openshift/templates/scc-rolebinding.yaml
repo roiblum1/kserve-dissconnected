@@ -1,0 +1,57 @@
+{{- if .Values.openshift.securityContextConstraints.enabled }}
+{{- $scc := .Values.openshift.securityContextConstraints }}
+{{- if not (or $scc.bindNamespaceServiceAccounts $scc.extraServiceAccounts) }}
+{{- fail "openshift.securityContextConstraints is enabled but neither bindNamespaceServiceAccounts nor extraServiceAccounts is set; pods would fail SCC admission" }}
+{{- end }}
+#
+# Grants `use` on the {{ $scc.name }} SecurityContextConstraints to workloads in
+# this namespace, via the cluster-wide role OpenShift auto-generates for every
+# SCC. Namespace-scoped, so it confers nothing outside {{ .Release.Namespace }}.
+#
+# Disabled by default: the upstream LWS pod spec sets `runAsNonRoot: true` and
+# deliberately does NOT set runAsUser, so OpenShift's default restricted-v2 SCC
+# assigns a UID from the namespace's range and admission succeeds. This is
+# verified in the README. Enable it only if you change the pod security context
+# to a fixed UID, in which case restricted-v2 (MustRunAsRange) rejects it.
+#
+# Kept as a pre-install hook for symmetry with the other charts in this repo:
+# there it is mandatory, because upstream Envoy Gateway's certgen Job is itself
+# a pre-install hook and Helm runs every hook before any ordinary manifest.
+#
+#
+# Under Argo CD this needs no argocd.argoproj.io annotations of its own. Argo CD
+# translates Helm hooks natively: `pre-install,pre-upgrade` becomes PreSync and
+# `helm.sh/hook-weight` becomes the sync wave, so the -5 below still orders this
+# ahead of everything at 0. Upstream gateway-helm relies on the same mapping --
+# its certgen RBAC carries the comment "Ensure rbac is created before the
+# certgen job when using ArgoCD or Flux". Do not add a second, hand-written
+# sync-wave annotation here: it would be a duplicate of the hook weight that
+# could silently drift from it.
+#
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "lws-openshift.fullname" . }}-scc-{{ $scc.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lws-openshift.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:{{ $scc.name }}
+subjects:
+{{- if $scc.bindNamespaceServiceAccounts }}
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: system:serviceaccounts:{{ .Release.Namespace }}
+{{- end }}
+{{- range $scc.extraServiceAccounts }}
+  - kind: ServiceAccount
+    name: {{ . }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,27 @@
+apiVersion: v2
+name: envoy-ai-gateway-openshift
+description: >-
+  Envoy AI Gateway packaged for OpenShift. Wraps the upstream ai-gateway-helm
+  chart, adds the SecurityContextConstraints binding it needs, scopes its
+  cluster-scoped mutating webhook, and optionally provisions a GatewayClass,
+  Gateway and OpenShift Route so the gateway is reachable on a cluster with no
+  LoadBalancer provider.
+type: application
+version: 0.1.0
+appVersion: "v1.1.0"
+home: https://aigateway.envoyproxy.io/
+sources:
+  - https://github.com/envoyproxy/ai-gateway
+keywords:
+  - envoy
+  - envoy-ai-gateway
+  - gateway-api
+  - openshift
+  - llm
+maintainers:
+  - name: platform-team
+dependencies:
+  - name: ai-gateway-helm
+    alias: ai-gateway
+    version: v1.1.0
+    repository: oci://docker.io/envoyproxy

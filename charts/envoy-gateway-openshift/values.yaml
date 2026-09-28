@@ -1,0 +1,171 @@
+# ---------------------------------------------------------------------------
+# envoy-gateway-openshift
+#
+# Everything under `openshift:` is added by this wrapper chart.
+# Everything under `envoy-gateway:` is passed straight through to the upstream
+# `gateway-helm` v1.9.1 subchart, so any key from
+# https://gateway.envoyproxy.io/docs/install/gateway-helm-api/ is valid there.
+# ---------------------------------------------------------------------------
+
+openshift:
+  securityContextConstraints:
+    # The upstream chart hard-codes runAsUser/runAsGroup/fsGroup 65532 for the
+    # controller, the certgen Job, the Envoy data-plane pods and the injected
+    # AI Gateway ext_proc sidecar. OpenShift's default `restricted-v2` SCC is
+    # MustRunAsRange and only admits UIDs from the namespace's
+    # openshift.io/sa.scc.uid-range annotation (typically 1000XXXXXX/10000), so
+    # 65532 is rejected and every pod fails admission.
+    #
+    # `nonroot-v2` is MustRunAsNonRoot: it admits any non-zero UID while still
+    # requiring drop ALL capabilities, no privilege escalation and the
+    # RuntimeDefault seccomp profile. All four images in this stack declare a
+    # non-root USER, so nonroot-v2 is sufficient -- do NOT use anyuid or
+    # privileged here.
+    enabled: true
+    name: nonroot-v2
+
+    # Envoy data-plane ServiceAccounts are named `envoy-<48-char-hash>`, derived
+    # by Envoy Gateway from the owning Gateway's namespace/name, so they cannot
+    # be enumerated at template time. Binding the SCC to the
+    # `system:serviceaccounts:<release-namespace>` group covers them. The
+    # binding is a namespace-scoped RoleBinding, so it grants nothing outside
+    # this namespace.
+    bindNamespaceServiceAccounts: true
+
+    # Set bindNamespaceServiceAccounts=false and list ServiceAccounts here to
+    # grant the SCC to named accounts only. Note that this will not cover the
+    # generated Envoy data-plane ServiceAccounts.
+    extraServiceAccounts: []
+
+# ---------------------------------------------------------------------------
+# Upstream gateway-helm values
+# ---------------------------------------------------------------------------
+envoy-gateway:
+
+  # Restore the labels upstream would emit. A Helm dependency alias becomes
+  # `.Chart.Name` inside the subchart, so without this `app.kubernetes.io/name`
+  # would be "envoy-gateway" instead of "gateway-helm". That label is part of
+  # Deployment.spec.selector.matchLabels, which Kubernetes treats as immutable,
+  # so matching upstream keeps an in-place `helm upgrade` from a plain
+  # gateway-helm release possible. With this set, 16 of the 17 shared objects
+  # render byte-identical to upstream; only envoy-gateway-config differs.
+  nameOverride: gateway-helm
+
+  # Pin every generated resource name (envoy-gateway, envoy-gateway-certgen, ...)
+  # so they do not vary with the Helm release name or the dependency alias.
+  fullnameOverride: envoy-gateway
+
+  # DANGER: leave this false on any shared or OpenShift cluster.
+  #
+  # The upstream `crds` sub-subchart ships Gateway API v1.6.1
+  # EXPERIMENTAL-channel CRDs under crds/, plus a
+  # `safe-upgrades.gateway.networking.k8s.io` ValidatingAdmissionPolicy under
+  # templates/. On OpenShift 4.19+ the cluster-ingress-operator owns and
+  # continuously reconciles the Gateway API CRDs (this cluster: v1.4.1,
+  # standard channel), and that admission policy matches EVERY CRD write
+  # (apiextensions.k8s.io/v1, resources: ["*"], failurePolicy: Fail) and denies
+  # any Gateway API CRD whose bundle-version matches ^v1\.[0-4] -- i.e. it
+  # would start rejecting the ingress-operator's own reconcile writes,
+  # cluster-wide, for every tenant.
+  #
+  # `crds.enabled: false` is a subchart CONDITION, so Helm skips the whole
+  # subchart -- both its crds/ directory and its templates/. That is why one
+  # value is enough here, and it is also why this chart requires Envoy Gateway
+  # v1.9.1: gateway-helm v1.8.1, which KServe v0.21.0 pins, has no `crds` key
+  # and no condition on that dependency, so nothing can turn it off. See
+  # README, "Why Envoy Gateway is v1.9.1 and not KServe's v1.8.1".
+  #
+  # templates/_validate.tpl fails the render if this is ever set back to true,
+  # or if crds.gatewayAPI.safeUpgradePolicy.enabled is turned on.
+  #
+  # Envoy Gateway's own CRDs (gateway.envoyproxy.io) are installed out of band
+  # by hack/install-crds.sh, which filters by API group. That is also exactly
+  # what KServe's own llmisvc-dependency-install.sh does.
+  crds:
+    enabled: false
+
+  # NOTE: the control-plane image is deliberately NOT pinned here. Upstream's
+  # `eg.image` helper already defaults to
+  # `docker.io/envoyproxy/gateway:{{ .Chart.Version }}`, which resolves to the
+  # subchart version (v1.9.1) and renders the identical full reference. Setting
+  # deployment.envoyGateway.image.{repository,tag} produced byte-identical
+  # output, so it was removed to keep the delta minimal.
+  deployment:
+    replicas: 1
+    envoyGateway:
+      resources:
+        limits:
+          memory: 1024Mi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+
+  config:
+    envoyGateway:
+      gateway:
+        controllerName: gateway.envoyproxy.io/gatewayclass-controller
+      logging:
+        level:
+          default: info
+
+      provider:
+        type: Kubernetes
+        kubernetes:
+          shutdownManager:
+            # Envoy Gateway's built-in default for this container is
+            # `docker.io/envoyproxy/gateway-dev:latest` -- a mutable dev tag
+            # that would be pulled into every Envoy data-plane pod and cannot be
+            # mirrored reproducibly. The release image carries the same
+            # shutdown-manager subcommand, so pin it here.
+            image: docker.io/envoyproxy/gateway:v1.9.1
+
+      extensionApis:
+        # Required by Envoy AI Gateway: it routes to AI providers via Backend.
+        enableBackend: true
+        # Recommended by upstream for forward/backward compatibility.
+        enableEnvoyPatchPolicy: true
+
+      # Envoy AI Gateway registers as an xDS translation hook. These values must
+      # match the AI Gateway controller Service created by the
+      # envoy-ai-gateway-openshift chart. Delete this whole block to run Envoy
+      # Gateway on its own without AI Gateway.
+      #
+      # Until the AI Gateway controller is running, Envoy Gateway starts
+      # normally but cannot finish programming Gateways. Install this chart
+      # first, then envoy-ai-gateway-openshift, then restart this deployment.
+      extensionManager:
+        hooks:
+          xdsTranslator:
+            translation:
+              listener:
+                includeAll: true
+              route:
+                includeAll: true
+              cluster:
+                includeAll: true
+              secret:
+                includeAll: true
+            post:
+              - Translation
+              - Cluster
+              - Route
+        service:
+          fqdn:
+            hostname: ai-gateway-controller.envoy-ai-gateway-system.svc.cluster.local
+            port: 1063
+
+  global:
+    # For a disconnected install, copy values-mirror.yaml, set your registry in
+    # it, and pass it with a second `-f`. imageRegistry only rewrites the
+    # control-plane, certgen and ratelimit images -- the Envoy data-plane and
+    # shutdown-manager images are full references and must be set explicitly.
+    imageRegistry: ""
+    imagePullSecrets: []
+    images:
+      envoyProxy:
+        # The ONLY image that genuinely has to be set. Envoy Gateway compiles
+        # this default into its binary (api/v1alpha1.DefaultEnvoyProxyImage), so
+        # it never appears in `helm template` output and is invisible to
+        # mirroring tooling. pullPolicy is left unset: the reference is
+        # digest-pinned, so Kubernetes already defaults to IfNotPresent.
+        image: docker.io/envoyproxy/envoy:distroless-v1.39.1@sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4

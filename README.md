@@ -1,11 +1,17 @@
 # Envoy AI Gateway + KServe LLMInferenceService on OpenShift
 
-Five Helm charts that install [Envoy Gateway](https://gateway.envoyproxy.io/) v1.9.1,
+Four Helm charts that install [Envoy Gateway](https://gateway.envoyproxy.io/) v1.9.1,
 [Envoy AI Gateway](https://aigateway.envoyproxy.io/) v1.1.0,
 [LeaderWorkerSet](https://lws.sigs.k8s.io/) v0.10.0 and
 [KServe](https://kserve.github.io/website/) LLMInferenceService v0.21.0 on
 OpenShift, packaged so they are safe to run on a **shared** cluster and
 mirrorable into a **disconnected** registry.
+
+**Built for Argo CD: one Application per chart directory, nothing else.** Each
+chart carries its own CRDs in `crds/` and orders everything inside itself with
+sync waves, so an Application needs only `path:`, a destination namespace and
+`ServerSideApply=true` — no value files, no `skipCrds`, no separate CRD
+Application. See [Deploying with Argo CD](#deploying-with-argo-cd).
 
 > **KServe leads the versions.** Every component version here is taken from
 > KServe v0.21.0's own `llmisvc-dependency-install.sh`, not from the newest
@@ -17,14 +23,17 @@ mirrorable into a **disconnected** registry.
 
 Verified end-to-end on OpenShift 4.22.13 / Kubernetes v1.35.6.
 
+| | Argo CD destination namespace | |
+|---|---|---|
+| `charts/envoy-gateway-openshift` | `envoy-gateway-system` | Envoy Gateway control plane + Envoy data plane, its CRDs and the InferencePool CRDs |
+| `charts/envoy-ai-gateway-openshift` | `envoy-ai-gateway-system` | Envoy AI Gateway control plane + GatewayClass/Gateway/Route, its CRDs |
+| `charts/kserve-llmisvc-openshift` | `kserve` | KServe LLMInferenceService controller, the 13 `LLMInferenceServiceConfig` presets, KServe + llm-d CRDs |
+| `charts/lws-openshift` | `lws-system` | LeaderWorkerSet controller and CRDs — multi-node model serving |
+
 | | |
 |---|---|
-| `charts/envoy-gateway-openshift` | Envoy Gateway control plane + Envoy data plane |
-| `charts/envoy-ai-gateway-openshift` | Envoy AI Gateway control plane + GatewayClass/Gateway/Route |
-| `charts/lws-openshift` | LeaderWorkerSet controller — multi-node model serving |
-| `charts/kserve-llmisvc-openshift` | KServe LLMInferenceService controller |
-| `charts/kserve-runtime-configs-openshift` | The `LLMInferenceServiceConfig` presets models refer to |
-| `hack/install-crds.sh` | Installs only the CRDs this stack owns |
+| `hack/update-crds.sh` | Regenerates every chart's `crds/` from the vendored upstream charts; `--check` fails on drift |
+| `hack/install-crds.sh` | Plain-Helm path only: applies the committed `crds/` (`helm upgrade` never does) |
 | `hack/list-images.sh` | Derives the mirror list from the charts; `--check` fails on drift |
 | `hack/list-patches.sh` | Derives every value change from the vendored subcharts |
 | `hack/resolve-digest.sh` | Resolves an image digest without pulling |
@@ -33,27 +42,31 @@ Verified end-to-end on OpenShift 4.22.13 / Kubernetes v1.35.6.
 | [`UPGRADE.md`](UPGRADE.md) | Version-bump runbook and checklist |
 | [`CLAUDE.md`](CLAUDE.md) | Working notes and invariants for this repo |
 
-Every chart is a thin wrapper around one upstream chart, pulled as a Helm
-dependency and vendored **byte-identical** — no upstream template is ever
-forked. The combined delta is **8 value overrides across five charts**, plus
-three SCC RoleBindings, the Gateway wiring, and not letting Helm own any CRD. Of
-upstream's 107 `gateway-helm` settings this repo overrides **two**, `lws` and
-`ai-gateway-helm` are overridden **not at all**, and 16 of the 17 shared Envoy
+Every chart is a thin wrapper around upstream charts, pulled as Helm
+dependencies and vendored **byte-identical** — no upstream template is ever
+forked. The combined delta is **8 value overrides across four charts**, plus
+three SCC RoleBindings, the Gateway wiring, sync waves, and CRDs shipped as
+generated, annotated copies of upstream's. Of
+upstream's 107 `gateway-helm` settings this repo overrides **two**, `lws` is
+overridden **not at all**, `ai-gateway-helm` **once** (cert-manager for its
+webhook, required under Argo CD), and 16 of the 17 shared Envoy
 Gateway objects render identical to upstream. See
 [how far this is from upstream](#how-far-this-is-from-upstream-measured) and
 [every change, and why](#every-change-and-why).
 
-**Upgrading: follow [`UPGRADE.md`](UPGRADE.md).** Bumping the version in
-`Chart.yaml` is necessary but not sufficient — two image defaults live in Envoy
-Gateway's Go source rather than the chart, `helm upgrade` never touches CRDs,
-the AI Gateway extension-hook contract ships outside the chart, and six of the
-images are hardcoded inside KServe's presets where no Helm value can reach them.
+**Upgrading: follow [`UPGRADE.md`](UPGRADE.md).** The mechanical part is three
+steps — bump `Chart.yaml`, drop the new tarballs into `charts/*/charts/` and
+`hack/charts/`, run `hack/update-crds.sh` — and Argo CD applies the new CRDs on
+the next sync. It is not sufficient on its own: two image defaults live in
+Envoy Gateway's Go source rather than the chart, the AI Gateway extension-hook
+contract ships outside the chart, and six of the images are hardcoded inside
+KServe's presets where no Helm value can reach them.
 
 **Disconnected installs** are the intended target. `mirror-config.yaml` feeds
 `oc mirror`, whose `ImageDigestMirrorSet` redirects every pull cluster-wide, so
 the charts install unmodified. Nothing in the install path reaches a chart
 registry: all five upstream subcharts and all three CRD charts are vendored in
-this repository.
+this repository, and the CRDs are committed in each chart's `crds/`.
 
 ---
 
@@ -143,10 +156,11 @@ One value, both hazards. `templates/_validate.tpl` fails the render if it is
 ever flipped back, or if `crds.gatewayAPI.safeUpgradePolicy.enabled` is turned
 on.
 
-`hack/install-crds.sh` then installs **only** `gateway.envoyproxy.io` and
-`aigateway.envoyproxy.io`, filtered by API group. It refuses to run if Gateway
-API CRDs are missing, and asserts afterwards that it did not become a field
-manager on any of them. As a backstop, this chart's `NOTES.txt` does a `lookup`
+The wrapper's **own** `crds/` then carries **only** `gateway.envoyproxy.io`
+(plus the two InferencePool CRDs, see section 7), generated by
+`hack/update-crds.sh` from upstream's `gateway-crds-helm` with
+`crds.gatewayAPI.enabled=false` and filtered by API group again. That script
+fails if any `gateway.networking.k8s.io` CRD would be written. As a backstop, this chart's `NOTES.txt` does a `lookup`
 after every install and prints the cluster's actual Gateway API channel:
 
 ```
@@ -154,7 +168,7 @@ Verified: Gateway API is v1.4.1 (standard channel), untouched by this release.
 ```
 
 — or a loud warning if it has flipped to experimental, which would mean the
-`crds/` directory got applied after all.
+upstream `crds` subchart got applied after all.
 
 **This is also KServe's own method.** `llmisvc-dependency-install.sh` installs
 Envoy Gateway by group-filtering the CRDs and then passing `--skip-crds`:
@@ -168,8 +182,8 @@ helm upgrade -i eg oci://docker.io/envoyproxy/gateway-helm --version "$EG" \
   -n envoy-gateway-system --create-namespace --skip-crds --wait
 ```
 
-`hack/install-crds.sh` is that pattern plus offline support and the Gateway-API
-assertion. What KServe's script does **not** do is disable the safe-upgrade
+`hack/update-crds.sh` is that pattern, baked into the chart so Argo CD applies
+it, plus offline support and the Gateway-API assertion. What KServe's script does **not** do is disable the safe-upgrade
 policy — `--skip-crds` does not touch `templates/` — so following that script
 verbatim on OpenShift installs a cluster-wide `Fail`-policy admission policy
 that rejects the ingress operator's writes. That single gap is the strongest
@@ -208,11 +222,12 @@ it, so no value can exclude the Gateway API files while keeping the
 `gateway-crds-helm` chart with the CRDs in `templates/`, where
 `crds.gatewayAPI.enabled=false` does work — and why upstream's own docs
 recommend it "for clusters with compatible provider-managed Gateway API CRDs".
-`hack/install-crds.sh` is that documented path, not a workaround.
+The wrapper's `crds/` is rendered from that chart, not a workaround.
 
-Note that `helm upgrade` never touches `crds/` either, so **CRD updates need an
-explicit step on every version bump regardless** of which approach is used.
-Re-running `hack/install-crds.sh` is that step.
+Note that `helm upgrade` never touches `crds/`, so with **plain Helm** CRD
+updates need an explicit `hack/install-crds.sh` on every version bump. **Argo CD
+has no such gap**: `crds/` is part of the rendered manifests and is applied on
+every sync like anything else.
 
 Envoy Gateway v1.9.1 compiles against Gateway API v1.6.1 but probes for each
 optional CRD at startup (`tcpRouteCRDExists`, `tlsRouteCRDExists`,
@@ -282,16 +297,23 @@ inferencemodelrewrites.llm-d.ai
 
 `templates/` means Helm owns them, and `helm uninstall` deletes what Helm owns —
 taking every `InferencePool` on the cluster with it, including other tenants'.
-`charts/kserve-llmisvc-openshift` sets `createGIECRDs: false` and
-`hack/install-crds.sh` applies the same four CRDs, rendered from the same chart
-version, out of band. The chart refuses to render if the value is flipped back.
+Under Argo CD they would also carry no sync wave and no deletion guard.
+`charts/kserve-llmisvc-openshift` sets `createGIECRDs: false`, and
+`hack/update-crds.sh` renders the same four CRDs, from the same chart version,
+into static `crds/` files instead: the two `llm-d.ai` ones in the kserve chart,
+the two `InferencePool` ones in `charts/envoy-gateway-openshift` (section 7).
+The chart refuses to render if the value is flipped back.
 
-The `lws` chart has the mirror-image problem: its three CRDs live in `crds/`,
-which `helm upgrade` **never** updates, so a version bump would silently leave
-the old schemas in place. Install it with `--skip-crds` and let the script own
-them. Forgetting `--skip-crds` at the *same* version is harmless — verified:
-server-side apply only conflicts when the incoming content differs, so Helm just
-co-owns the identical object. At a *different* version it does conflict.
+Every generated CRD carries
+`argocd.argoproj.io/sync-options: ServerSideApply=true,Prune=false,Delete=false`,
+so neither dropping a CRD upstream nor deleting an Application ever removes it —
+removing a CRD garbage-collects every object of that kind, cluster-wide.
+
+The `lws` chart ships its three CRDs in its own `crds/` with no gate, so
+`charts/lws-openshift` simply lets them through (Argo CD renders `crds/` by
+default). They carry no wave or deletion guard of their own — nothing in that
+chart creates LWS objects, so they need no wave, but see
+[Uninstall](#uninstall) before deleting that Application.
 
 ### 6. The `llminferenceservices` CRD hardcodes the namespace `kserve`
 
@@ -328,17 +350,20 @@ neither is a default:
   the reference with *"Group is invalid, only the core API group,
   multicluster.x-k8s.io and gateway.envoyproxy.io are supported"* and installs a
   **500 direct response** on every matching route.
-  `charts/envoy-gateway-openshift/values-inference-pool.yaml` supplies it — a
-  re-keyed copy of upstream's own add-on file.
+  `charts/envoy-gateway-openshift/values.yaml` sets it — a re-keyed copy of
+  upstream's own add-on file. Envoy Gateway watches that kind from startup, so
+  the `InferencePool` CRDs ship in **the same chart's** `crds/` at wave -10:
+  they exist before the controller does.
 * **The listener must accept routes from the model's namespace.** Those
-  `HTTPRoute`s are created in the model's namespace, not the Gateway's, so the
-  chart's default `allowedRoutes.namespaces.from: Same` rejects them.
-  `charts/envoy-ai-gateway-openshift/values-kserve.yaml` widens it to `All`.
+  `HTTPRoute`s are created in the model's namespace, not the Gateway's, so
+  `allowedRoutes.namespaces.from: Same` would reject them.
+  `charts/envoy-ai-gateway-openshift/values.yaml` sets `All`.
 
-Both are separate overlay files rather than defaults, because both are wrong for
-an Envoy-only install: declaring a `backendResource` whose CRD is absent makes
-the controller log a failed watch on every reconcile, and widening
-`allowedRoutes` for no reason is a needless loosening.
+Both used to be separate `-f` overlays. They are defaults now because this
+repo always installs KServe, and an Argo CD Application pointed at a chart
+directory should get a working stack with no value files — a forgotten overlay
+was the one failure mode that passed every install check and broke only at
+first model request.
 
 ---
 
@@ -394,81 +419,170 @@ namespaces hold only controllers and configuration — `kserve` is not negotiabl
 
 ---
 
-## Install
+## Deploying with Argo CD
 
-Requires `helm` 4.x (or 3.8+ for OCI), `oc`/`kubectl`, `python3`, and
-cluster-admin for the CRD step. **cert-manager must already be installed** —
-KServe's webhook certificate comes from it. On OpenShift use the cert-manager
-Operator for Red Hat OpenShift; `hack/install-crds.sh` checks for it.
+**Prerequisite, not managed here: cert-manager.** The kserve and AI Gateway
+charts both get their webhook certificates from it. On OpenShift install the
+cert-manager Operator for Red Hat OpenShift first.
 
-The subcharts are already vendored, so steps 2–8 need no registry access.
+Point one Application at each chart directory. That is all the charts need —
+every required setting is a default, every CRD is inside the chart, and every
+ordering constraint inside a chart is a sync wave:
+
+| Application (`releaseName`) | `path` | destination namespace | sync order |
+|---|---|---|---|
+| `envoy-gateway` | `charts/envoy-gateway-openshift` | `envoy-gateway-system` | 1st |
+| `envoy-ai-gateway` | `charts/envoy-ai-gateway-openshift` | `envoy-ai-gateway-system` | 2nd |
+| `lws` | `charts/lws-openshift` | `lws-system` | 2nd (parallel) |
+| `kserve-llmisvc` | `charts/kserve-llmisvc-openshift` | `kserve` | 3rd |
+
+Inside each chart, as Argo CD sees it (Helm hooks become `PreSync`; a
+resource without a wave annotation is wave 0):
+
+```
+envoy-gateway-openshift      PreSync -5  SCC RoleBinding            (wrapper hook)
+                             PreSync -1  certgen RBAC + webhook     (upstream hooks)
+                             PreSync  0  certgen Job                (upstream hook)
+                             wave  -10   10 CRDs: gateway.envoyproxy.io + 2 InferencePool
+                             wave    0   Envoy Gateway controller, Service, RBAC, ConfigMap
+
+envoy-ai-gateway-openshift   wave  -10   6 CRDs: aigateway.envoyproxy.io
+                             wave   -5   SCC RoleBinding
+                             wave    0   AI Gateway controller, cert-manager Certificate/Issuer,
+                                         MutatingWebhookConfiguration, EnvoyProxy
+                             wave    1   GatewayClass
+                             wave    2   Gateway              <- after the controller is healthy
+                             wave    3   OpenShift Route
+
+lws-openshift                wave    0   LWS controller + upstream's own 3 CRDs from crds/
+
+kserve-llmisvc-openshift     PreSync -5  SCC RoleBinding            (wrapper hook)
+                             wave  -10   5 CRDs: serving.kserve.io + llm-d.ai
+                             wave    0   llmisvc controller, webhooks, Certificate, ConfigMap,
+                                         ClusterStorageContainer
+                             wave   10   13 LLMInferenceServiceConfig presets
+```
+
+Three of those waves carry real weight:
+
+* **CRDs at -10.** Argo CD waits for a wave to be healthy — a CRD is healthy
+  once `Established` — before the next, so no custom resource is ever applied
+  before its kind exists.
+* **The Gateway at 2** is what replaces the plain-Helm
+  `oc rollout restart deployment/envoy-gateway`. Envoy Gateway dials the AI
+  Gateway extension server the first time it programs a Gateway; created only
+  after the AI Gateway controller is healthy, the Gateway never races it.
+* **The presets at 10.** The kserve chart installs a
+  `ValidatingWebhookConfiguration` for `LLMInferenceServiceConfig` with
+  `failurePolicy: Fail`; before the controller pod is Ready it has no endpoints
+  and would reject every preset. Wave 0 healthy means the controller Deployment
+  is Available. (This is why plain Helm needed two KServe releases; under Argo
+  CD it is one chart.)
+
+The **sync order between Applications** is yours to set, since you create the
+Applications. It comes from what each chart consumes from the others:
+`envoy-ai-gateway` creates an `EnvoyProxy` (a CRD from `envoy-gateway`), Envoy
+Gateway watches `InferencePool` (shipped in its own chart for that reason),
+and the KServe controller uses `LeaderWorkerSet` and `InferencePool`. In an
+app-of-apps, annotate the Applications `argocd.argoproj.io/sync-wave` 0 / 1 /
+1 / 2 as in the table — note that Argo CD only waits on a child Application's
+health if the `argoproj.io/Application` health check is enabled in `argocd-cm`
+(it has been off by default since Argo CD 1.8). Without that, a sync `retry`
+with backoff converges on its own; it just takes a few attempts.
+
+### What every Application must set
+
+```yaml
+spec:
+  source:
+    path: charts/<chart>
+    helm:
+      releaseName: <name from the table>   # object names derive from it; `lws`
+                                           # in particular must stay `lws`
+      # Do NOT set skipCrds: the CRDs are part of the chart now.
+      # Optional overlays only -- nothing is required:
+      # valueFiles: [values.yaml, values-mirror.yaml]           # no IDMS
+      # valueFiles: [values.yaml, values-loadbalancer.yaml]     # ai-gateway, LB clusters
+  destination:
+    namespace: <namespace from the table>   # kserve and lws-system are NOT optional:
+                                            # their CRDs hardcode them (section 6)
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true         # REQUIRED: several CRDs exceed the 256 KiB
+                                     # client-side-apply annotation limit
+      - RespectIgnoreDifferences=true
+    retry: { limit: 10, backoff: { duration: 30s, factor: 2, maxDuration: 5m } }
+  ignoreDifferences:                 # cert-manager / cert rotators own these
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions: [".webhooks[]?.clientConfig.caBundle"]
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions: [".webhooks[]?.clientConfig.caBundle"]
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      jqPathExpressions: [".spec.conversion.webhook.clientConfig.caBundle"]
+```
+
+`ServerSideApply=true` is also set per CRD by annotation, but the LWS CRDs come
+straight from upstream without it, so set it on the Application too. For
+`lws`, additionally ignore `/data` on the `lws-webhook-server-cert` Secret: the
+chart renders it empty and the controller's cert rotator fills it in.
+
+`prune: true` and `selfHeal: true` are safe on all four. The CRDs this repo
+generates carry `argocd.argoproj.io/sync-options: …,Prune=false,Delete=false`,
+so neither pruning nor deleting an Application removes them (see
+[Uninstall](#uninstall)).
+
+**What has been verified, and how.** The end-to-end cluster results in this
+README were measured on the plain-Helm install. The Argo CD layout was verified
+by rendering what Argo CD renders (`helm template --include-crds`, with Helm
+3.17 as bundled by Argo CD and Helm 4.1): every non-CRD object is identical to
+the plain-Helm install with its former required overlays, the 13 presets are
+identical to upstream's apart from the wave annotation, every generated CRD is
+identical to upstream's apart from its two annotations, and the AI Gateway
+chart renders byte-identically twice in a row. Run the
+[Verify](#verify) steps after the first sync.
+
+### Plain Helm (alternative)
+
+Without Argo CD the waves do nothing, so the ordering is manual. Requires `helm`
+4.x (or 3.8+), `oc`/`kubectl`, and cluster-admin. The subcharts are vendored,
+so nothing needs registry access.
 
 ```bash
-# 1. OPTIONAL, connected hosts only: refresh the vendored subcharts.
-#    Skip this on a disconnected bastion -- charts/*/charts/*.tgz and
-#    hack/charts/*.tgz are committed.
-for c in charts/*-openshift; do helm dependency update "$c"; done
+# 1. CRDs. `helm install` would apply crds/ itself, but `helm upgrade` never
+#    does, so use the script on install and on every upgrade alike.
+#    Never Gateway API -- the script asserts it afterwards.
+./hack/install-crds.sh --dry-run && ./hack/install-crds.sh
 
-# 2. CRDs. Never Gateway API -- the script asserts it afterwards.
-#    Preview first.
-./hack/install-crds.sh --dry-run
-./hack/install-crds.sh
-
-# 3. Envoy Gateway, with InferencePool support for KServe.
-#    --skip-crds is belt-and-braces: values.yaml already sets
-#    crds.enabled=false, which skips the whole crds subchart. Pass it anyway so
-#    the command is safe even if that value is ever lost. See section 3.
+# 2. Envoy Gateway, then AI Gateway (GatewayClass, Gateway, Route)
 helm install envoy-gateway charts/envoy-gateway-openshift \
-  -n envoy-gateway-system --create-namespace --wait --timeout 6m --skip-crds \
-  -f charts/envoy-gateway-openshift/values-inference-pool.yaml
-
-# 4. Envoy AI Gateway (creates the GatewayClass, Gateway and Route),
-#    accepting HTTPRoutes from model namespaces
+  -n envoy-gateway-system --create-namespace --wait --timeout 6m
 helm install envoy-ai-gateway charts/envoy-ai-gateway-openshift \
-  -n envoy-ai-gateway-system --create-namespace --wait --timeout 5m \
-  -f charts/envoy-ai-gateway-openshift/values-kserve.yaml
+  -n envoy-ai-gateway-system --create-namespace --wait --timeout 5m
+#    LB clusters: -f charts/envoy-ai-gateway-openshift/values-loadbalancer.yaml
+#    Check first: oc get infrastructure cluster -o jsonpath='{.status.platform}'
 
-#    On a cluster WITH a load-balancer provider, add the overlay too:
-#      -f charts/envoy-ai-gateway-openshift/values-loadbalancer.yaml
-#    Confirm first: oc get infrastructure cluster -o jsonpath='{.status.platform}'
-
-# 5. Envoy Gateway must reconnect to the AI Gateway xDS hook
+# 3. Envoy Gateway must reconnect to the AI Gateway xDS hook (Argo CD's
+#    wave 2 makes this unnecessary there)
 oc rollout restart -n envoy-gateway-system deployment/envoy-gateway
 oc rollout status  -n envoy-gateway-system deployment/envoy-gateway
 
-# 6. LeaderWorkerSet. --skip-crds because step 2 owns them.
-helm install lws charts/lws-openshift \
-  -n lws-system --create-namespace --skip-crds --wait --timeout 5m
+# 4. LeaderWorkerSet
+helm install lws charts/lws-openshift -n lws-system --create-namespace --wait
 
-# 7. KServe LLMInferenceService controller. The namespace MUST be `kserve`.
+# 5. KServe, in two passes: the presets need the controller's webhook up first
+#    (Argo CD's wave 10 does this in one sync). Namespace MUST be kserve.
 helm install kserve-llmisvc charts/kserve-llmisvc-openshift \
-  -n kserve --create-namespace --wait --timeout 6m
-
-# 8. The LLMInferenceServiceConfig presets. Separate release on purpose --
-#    see below.
-helm install kserve-runtime-configs charts/kserve-runtime-configs-openshift \
-  -n kserve --wait --timeout 3m
+  -n kserve --create-namespace --set runtimeConfigs.enabled=false --wait --timeout 6m
+helm upgrade kserve-llmisvc charts/kserve-llmisvc-openshift -n kserve --wait
 ```
 
-**Step 5 is required.** Envoy Gateway is configured with an `extensionManager`
-pointing at `ai-gateway-controller.envoy-ai-gateway-system.svc.cluster.local:1063`,
-which does not exist during step 3. It starts fine but cannot finish programming
-Gateways until the AI Gateway controller is up and it has reconnected.
-
-**Steps 7 and 8 cannot be one release.** Step 8 creates
-`LLMInferenceServiceConfig` custom resources, and step 7 installs a
-`ValidatingWebhookConfiguration` for that kind with `failurePolicy: Fail`. Helm
-applies every manifest in a release in a single pass and only *then* waits, so
-in a combined release the presets would be rejected by a webhook whose Service
-has no endpoints yet. Upstream splits them for the same reason; the version pins
-in the two `Chart.yaml` files must stay equal.
-
-**`helm upgrade` does not remember `-f` flags, or `--skip-crds`.** Steps 3, 4
-and any mirror or LoadBalancer overlay must be repeated on every upgrade of
-those releases, or the `extensionManager` block and the widened `allowedRoutes`
-silently revert. `--skip-crds` matters less — `crds.enabled=false` already
-covers it, and `helm upgrade` never touches `crds/` anyway — but pass it
-regardless so the command is identical every time.
+`helm upgrade` does not remember `-f` or `--set` flags: repeat any mirror or
+LoadBalancer overlay on every upgrade. Nothing *required* lives in an overlay
+any more, so forgetting one reverts only an optional customisation.
 
 ### Verify
 
@@ -569,7 +683,7 @@ for anything that does not need it.
 
 #### Proving the KServe data path
 
-`helm install` succeeding proves nothing about routing. Apply a throwaway
+A green sync proves nothing about routing. Apply a throwaway
 `LLMInferenceService` and check the three things that actually break:
 
 ```bash
@@ -600,7 +714,7 @@ EOF
 
 # 1. The HTTPRoute must be BOTH Accepted and ResolvedRefs on our Gateway.
 #    ResolvedRefs=True is the InferencePool backendRef resolving -- that is what
-#    proves values-inference-pool.yaml is in effect.
+#    proves extensionManager.backendResources is in effect.
 oc get httproute vtest-llm-kserve-route -n vtest-llm \
   -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {end}{"\n"}'
 # Accepted=True ResolvedRefs=True
@@ -733,9 +847,11 @@ hack/charts/ai-gateway-crds-helm-v1.1.0.tgz
 hack/charts/kserve-llmisvc-crd-v0.21.0-rc1.tgz
 ```
 
-`hack/install-crds.sh` reads those in preference to any registry, so the CRD
-step runs on a bastion with no egress. It falls back to pulling from upstream
-only if a tarball is missing, and says so when it does.
+`hack/update-crds.sh` reads those in preference to any registry when it
+regenerates `charts/*/crds/`, so a version bump runs on a bastion with no
+egress. It falls back to pulling from upstream only if a tarball is missing,
+and says so when it does. Installing needs neither: the generated CRDs are
+committed.
 
 ### Keeping the mirror list honest
 
@@ -765,8 +881,8 @@ redirected and the reference itself must name the mirror:
 ```bash
 helm install envoy-gateway charts/envoy-gateway-openshift \
   -n envoy-gateway-system --create-namespace \
-  -f charts/envoy-gateway-openshift/values-inference-pool.yaml \
   -f charts/envoy-gateway-openshift/values-mirror.yaml
+# Argo CD: helm.valueFiles: [values.yaml, values-mirror.yaml]
 ```
 
 Three image references are **not** rewritten by `global.imageRegistry` and must
@@ -925,6 +1041,7 @@ dot-accessed in a Go template, which is why the wrapper templates use
 | `openshift.securityContextConstraints.bindNamespaceServiceAccounts` | `true` | Needed for the hashed data-plane SA |
 | `envoy-gateway.crds.enabled` | `false` | **Leave false.** See section 3 |
 | `envoy-gateway.config.envoyGateway.extensionManager` | set | Remove to run without AI Gateway |
+| `envoy-gateway.config.envoyGateway.extensionManager.backendResources` | `InferencePool` | **Required with KServe** — without it every model route is a 500. See section 7 |
 | `envoy-gateway.config.envoyGateway.provider.kubernetes.shutdownManager.image` | `gateway:v1.9.1` | Pins away from `gateway-dev:latest` |
 
 ### `charts/envoy-ai-gateway-openshift`
@@ -941,6 +1058,9 @@ dot-accessed in a Go template, which is why the wrapper templates use
 | `gateway.envoyProxy.service.externalTrafficPolicy` | `""` | `Local` preserves client IP but only routes to nodes running an Envoy pod |
 | `gateway.envoyProxy.service.allocateLoadBalancerNodePorts` | `null` | `false` suppresses NodePorts on providers that do not need them |
 | `gateway.envoyProxy.replicas` | `1` | Raise before using `externalTrafficPolicy: Local` |
+| `gateway.listener.allowedRoutes.namespaces.from` | `All` | **Required with KServe** — model `HTTPRoute`s live in model namespaces. A `Selector` also works |
+| `argocd.syncWave.*` | `-5`/`0`/`1`/`2`/`3` | SCC binding / EnvoyProxy / GatewayClass / Gateway / Route. Only the order matters |
+| `ai-gateway.controller.mutatingWebhook.certManager.enable` | `true` | **Required under Argo CD** — upstream's in-template cert is regenerated on every render |
 | `gateway.listener.port` | `80` | Envoy Gateway shifts ports <1024 by +10000, so 80 is served on container port 10080 |
 | `gateway.route.create` | `true` | Set false in LoadBalancer mode |
 | `gateway.route.targetPort` | `""` (→ `http-80`) | Must name the Service port, **not** the Service port number — see Troubleshooting |
@@ -948,9 +1068,8 @@ dot-accessed in a Go template, which is why the wrapper templates use
 | `gateway.envoyGatewayNamespace` | `envoy-gateway-system` | Must match `ai-gateway.envoyGateway.namespace`; the chart fails the render if they drift |
 | `ai-gateway.controller.mutatingWebhook.namespaceSelector` | `envoy-gateway-system` | Remove if you enable `gatewayNamespaceMode` |
 
-Overlay files for this chart: `values-loadbalancer.yaml` (LoadBalancer instead
-of Route), `values-kserve.yaml` (`allowedRoutes: All`, required for KServe),
-`values-mirror.yaml`.
+Optional overlay files for this chart: `values-loadbalancer.yaml`
+(LoadBalancer instead of Route) and `values-mirror.yaml`.
 
 ### `charts/lws-openshift`
 
@@ -965,8 +1084,10 @@ with no limits, `enableCertManager: false` (LWS issues and rotates its own
 webhook certificate), and `enableDisaggregatedSet: false` (a separate API KServe
 v0.21.0 does not use). All three are upstream defaults and left alone.
 
-Install with `--skip-crds`; `hack/install-crds.sh` owns the three
-`leaderworkerset.x-k8s.io`/`disaggregatedset.x-k8s.io` CRDs.
+The three `leaderworkerset.x-k8s.io`/`disaggregatedset.x-k8s.io` CRDs come
+from upstream's own `crds/` in the vendored subchart — do not set `skipCrds`.
+Destination namespace must be `lws-system`: the `leaderworkersets` CRD
+hardcodes its conversion webhook to `lws-webhook-service.lws-system`.
 
 ### `charts/kserve-llmisvc-openshift`
 
@@ -980,15 +1101,15 @@ Install with `--skip-crds`; `hack/install-crds.sh` owns the three
 | `kserve-llmisvc-resources.kserve.storage.image` | `docker.io/kserve/storage-initializer` | Same, for the model-fetch init container |
 | `kserve-llmisvc-resources.kserve.controller.gateway.ingressGateway.kserveGateway` | `envoy-ai-gateway-system/envoy-ai-gateway` | `<namespace>/<name>` of the Gateway every generated `HTTPRoute` attaches to. A bare name silently resolves to the release namespace, so the chart validates the shape |
 | `kserve-llmisvc-resources.kserve.createSharedResources` | `true` | Correct while `kserve-resources` is not installed. Set `false` when adding LLMInferenceService to an existing KServe |
-
-### `charts/kserve-runtime-configs-openshift`
-
-| Key | Default | Notes |
-|---|---|---|
-| `kserve-runtime-configs.kserve.llmisvcConfigs.enabled` | `true` | Upstream default is `false`; this is the only override and the reason the chart exists |
+| `runtimeConfigs.enabled` | `true` | Renders the 13 `LLMInferenceServiceConfig` presets at `argocd.syncWave.runtimeConfigs` (`10`). Plain Helm: `false` on the first install, see [Plain Helm](#plain-helm-alternative) |
+| `kserve-runtime-configs.kserve.llmisvcConfigs.enabled` | `false` | Upstream default, and it must stay: the wrapper renders the same presets itself, with a wave. The chart fails the render if both are on |
 | `kserve-runtime-configs.kserve.servingruntime.enabled` | `false` | Upstream default. These are the predictive-serving runtimes (sklearn, triton, …) — enabling them adds about a dozen images to mirror |
 
-No pods, no SCC, no OpenShift additions.
+The presets come from the vendored `kserve-runtime-configs` subchart's own
+`files/llmisvcconfigs/resources.yaml`, read through `.Subcharts` by
+`templates/llmisvcconfigs.yaml`: same objects, byte-for-byte (verified by
+parsing both renders), plus one sync-wave annotation. A version bump is still
+just a tarball swap.
 
 ---
 
@@ -1003,20 +1124,21 @@ pure-upstream install would cost. Regenerate its machine-checkable half with
 No upstream template, helper or values file is edited, patched or
 post-rendered. All five subcharts are vendored byte-identical to a fresh
 `helm pull` (verified by sha256 — each digest appears exactly twice). The delta
-is **8 value overrides**, 13 added values, five added Kubernetes resource kinds,
-and no chart owning a CRD.
+is **8 value overrides**, 14 added values, five added Kubernetes resource kinds,
+the presets re-rendered with a sync wave, and CRDs shipped as generated copies
+of upstream's with two Argo CD annotations added.
 
 ```
 $ ./hack/list-patches.sh --summary
-WRAPPER CHART                       upstream  OVERRIDE  ADDED  restated
-------------------------------------------------------------------------
-envoy-gateway-openshift                  107         2     12         9
-envoy-ai-gateway-openshift                76         0      1         9
-lws-openshift                             24         0      0         9
-kserve-llmisvc-openshift                 151         5      0         1
-kserve-runtime-configs-openshift         158         1      0         1
-------------------------------------------------------------------------
-TOTAL                                                8     13
+WRAPPER CHART                                        upstream  OVERRIDE  ADDED  restated
+-----------------------------------------------------------------------------------------
+envoy-gateway-openshift                                   107         2     13         9
+envoy-ai-gateway-openshift                                 76         1      1        11
+lws-openshift                                              24         0      0         9
+kserve-llmisvc-openshift [kserve-llmisvc-resources]       151         5      0         1
+kserve-llmisvc-openshift [kserve-runtime-configs]         158         0      0         2
+-----------------------------------------------------------------------------------------
+TOTAL                                                                 8     14
 ```
 
 `restated` keys hold upstream's own value — they exist so the knobs are visible
@@ -1066,9 +1188,9 @@ evidence:
 | Idea | Result |
 |---|---|
 | Drop the KServe controller's `runAsUser: 1000` so `restricted-v2` assigns a UID — no SCC grant at all | **Does not work.** Helm merges parent values *into* subchart defaults, so a key cannot be removed from a subchart map. Setting it to `null` leaves `runAsUser: 1000`; even restating the whole 7-key `containerSecurityContext` without it leaves `runAsUser: 1000`. Verified both ways. The only alternative is forking the upstream template, which is a bigger delta than one `RoleBinding` |
-| Pin the AI Gateway image tags for mirroring | **Rejected as redundant** — upstream's defaults render the identical reference. Removed, taking `ai-gateway-helm` to zero overrides |
+| Pin the AI Gateway image tags for mirroring | **Rejected as redundant** — upstream's defaults render the identical reference. Removed; `ai-gateway-helm`'s only override is the cert-manager one Argo CD forces |
 | Pin the Envoy Gateway control-plane image | **Rejected as redundant** — upstream's `eg.image` helper already defaults to `gateway:{{ .Chart.Version }}`. Removed earlier for the same reason |
-| Use `--skip-crds` instead of `crds.enabled=false` | **Rejected as insufficient** — it does not stop the admission policy in `templates/`, and it is a flag rather than a value. Kept as belt-and-braces alongside the value |
+| Use `--skip-crds` instead of `crds.enabled=false` | **Rejected as insufficient** — it does not stop the admission policy in `templates/`, and it is a flag rather than a value (Argo CD's equivalent, `skipCrds`, would also drop this repo's own CRDs, which now live in `crds/`) |
 | Follow KServe's Envoy Gateway v1.8.1 pin | **Blocked** — v1.8.1 cannot start without the experimental `ListenerSet` CRD. See [the evidence](#why-envoy-gateway-is-v191-and-not-kserves-v181) |
 | Let KServe create its own `kserve-ingress-gateway` (upstream's default) and override nothing | **Possible, not chosen.** It means a second Envoy data plane, Service and Route. One value override points KServe at the Gateway that already exists; set `kserveGateway` back to `kserve/kserve-ingress-gateway` and create that Gateway if you prefer the separation |
 
@@ -1078,7 +1200,7 @@ evidence:
 |---|---|---|---|
 | 1 | `gateway-helm` | `crds.enabled=false` | Gateway API v1.6.1 experimental CRDs overwrite the ingress-operator's v1.4.1, **and** a `Fail`-policy admission policy starts rejecting its reconcile writes — cluster-wide, all tenants |
 | 2 | `kserve-llmisvc-resources` | `kserve.llmisvc.createGIECRDs=false` | `helm uninstall` deletes four cluster-scoped CRDs and every `InferencePool` on the cluster |
-| 3 | `kserve-runtime-configs` | `kserve.llmisvcConfigs.enabled=true` | No presets, so `spec.baseRefs` resolves to nothing and only fully-inline model specs work |
+| 3 | `ai-gateway-helm` | `controller.mutatingWebhook.certManager.enable=true` | Under Argo CD the chart mints a new webhook CA and key on **every render** (its `lookup` has no cluster in the repo-server): the Application is permanently OutOfSync and, with selfHeal, rotates the keypair on every sync |
 | 4 | `kserve-llmisvc-resources` | `…ingressGateway.kserveGateway` | HTTPRoutes attach to `kserve/kserve-ingress-gateway`, which does not exist, so models are unreachable |
 | 5 | `gateway-helm` | `global.images.envoyProxy.image` | The data-plane image is a compiled-in Go default, invisible to `helm template`, so it never reaches the mirror list and pods `ImagePullBackOff` when disconnected |
 | 6 | `kserve-llmisvc-resources` | `kserve.llmisvc.controller.image` fully qualified | Works on this cluster (`docker.io` is in `unqualified-search-registries`), but CRI-O tries `registry.access.redhat.com` first, which is unreachable when disconnected. Defensive, not strictly required |
@@ -1101,21 +1223,22 @@ rather than a requirement.
 
 Nothing upstream is forked — all five upstream charts are Helm dependencies,
 vendored byte-identical. Everything below is either a **value override**, an
-**added resource**, or a step **moved out of Helm**. Use this as the diff to
-re-apply when bumping versions.
+**added resource**, or **CRDs re-shipped** in a wrapper's `crds/`. Use this as
+the diff to re-apply when bumping versions.
 
-Totals: **8 value overrides** across five charts, one added subchart value,
+Totals: **8 value overrides** across four charts, one added subchart value,
 five added Kubernetes resource kinds (`RoleBinding`, `GatewayClass`, `Gateway`,
-`EnvoyProxy`, `Route`), and no chart owning a CRD. Every one is itemised with
-its justification in [Every change, and why](#every-change-and-why).
+`EnvoyProxy`, `Route`), the KServe presets re-rendered with a sync wave, and 21
+CRDs shipped as generated, annotated copies of upstream's. Every one is
+itemised with its justification in [Every change, and why](#every-change-and-why).
 
 | Chart | Upstream leaf values | Overridden |
 |---|---|---|
 | `gateway-helm` v1.9.1 | 107 | 2 |
-| `ai-gateway-helm` v1.1.0 | 76 | **0** (+1 added) |
+| `ai-gateway-helm` v1.1.0 | 76 | 1 (+1 added) |
 | `lws` v0.10.0 | 24 | **0** |
 | `kserve-llmisvc-resources` v0.21.0-rc1 | 151 | 5 |
-| `kserve-runtime-configs` v0.21.0-rc1 | 158 | 1 |
+| `kserve-runtime-configs` v0.21.0-rc1 | 158 | **0** |
 
 ### Value overrides on `gateway-helm` v1.9.1
 
@@ -1132,10 +1255,12 @@ its justification in [Every change, and why](#every-change-and-why).
 
 ### Value overrides on `ai-gateway-helm` v1.1.0
 
-**Zero overrides.** One value is *added* where upstream has none:
+**One override**, forced by Argo CD, and one value *added* where upstream has
+none:
 
 | Key | Upstream default | Ours | Why |
 |---|---|---|---|
+| `controller.mutatingWebhook.certManager.enable` | `false` | **`true`** | Upstream mints the webhook cert inside the template, guarded by `lookup`. Argo CD renders with no cluster connection, so `lookup` is always nil and every render generates a new CA and key: a permanently OutOfSync Application that rotates the keypair on every self-heal. cert-manager (already required for KServe) makes the render deterministic. |
 | `controller.mutatingWebhook.namespaceSelector` | *(absent)* | `kubernetes.io/metadata.name in [envoy-gateway-system]` | The `MutatingWebhookConfiguration` is cluster-scoped, matches **pod CREATE** and has `failurePolicy: Fail`. Upstream's `objectSelector` already narrows it to envoy-gateway-managed pods; adding a namespaceSelector bounds the blast radius on a shared cluster to the one namespace that has such pods. Remove it if you enable `gatewayNamespaceMode`. |
 
 Two overrides that used to be here were **removed after measuring them**:
@@ -1162,7 +1287,7 @@ needed.
 
 | Key | Upstream default | Ours | Why |
 |---|---|---|---|
-| `kserve.llmisvc.createGIECRDs` | `true` | **`false`** | Renders four cluster-scoped CRDs into `templates/`, so `helm uninstall` would delete them and every `InferencePool`/`InferenceObjective` on the cluster. `hack/install-crds.sh` applies the same four, rendered from this same chart version. |
+| `kserve.llmisvc.createGIECRDs` | `true` | **`false`** | Renders four cluster-scoped CRDs into `templates/`, so `helm uninstall` would delete them and every `InferencePool`/`InferenceObjective` on the cluster. `hack/update-crds.sh` renders the same four, from this same chart version, into static `crds/` files with `Prune=false,Delete=false`. |
 | `kserve.llmisvc.controller.image` | `kserve/llmisvc-controller` | `docker.io/kserve/llmisvc-controller` | An unqualified name is resolved by CRI-O's `unqualified-search-registries`, so a mirror map for `docker.io/kserve/*` only applies if `docker.io` is still in that list on every node. The tag stays derived from `kserve.version`. |
 | `kserve.llmisvc.controller.imagePullPolicy` | `Always` | `IfNotPresent` | `Always` makes every pod restart depend on the registry being reachable, even though the image is already on the node — a bad property in a disconnected cluster. |
 | `kserve.storage.image` | `kserve/storage-initializer` | `docker.io/kserve/storage-initializer` | Same as above. This is the image in the `default` `ClusterStorageContainer`. |
@@ -1170,9 +1295,13 @@ needed.
 
 ### Value overrides on `kserve-runtime-configs` v0.21.0-rc1
 
-| Key | Upstream default | Ours | Why |
-|---|---|---|---|
-| `kserve.llmisvcConfigs.enabled` | `false` | **`true`** | The whole purpose of the chart here: the 13 `LLMInferenceServiceConfig` presets that `spec.baseRefs` resolves against. |
+None — `kserve.llmisvcConfigs.enabled` stays at upstream's `false`. The 13
+`LLMInferenceServiceConfig` presets are rendered by the kserve wrapper's
+`templates/llmisvcconfigs.yaml` instead, from this subchart's own
+`files/llmisvcconfigs/resources.yaml` (read via `.Subcharts`), identical except
+for `argocd.argoproj.io/sync-wave: "10"`. Upstream's template offers no way to
+annotate them, and without a later wave the controller's `Fail`-policy webhook
+rejects them before it has endpoints.
 
 ### Resources added (no upstream equivalent)
 
@@ -1184,19 +1313,28 @@ needed.
 | `_validate.tpl` | AI GW | Fails the render if `gateway.envoyGatewayNamespace` and `ai-gateway.envoyGateway.namespace` disagree — otherwise the Route silently points at an endpoint-less Service. |
 | `RoleBinding` → `system:openshift:scc:nonroot-v2` | llmisvc | The controller pod asks for UID 1000; `restricted-v2` is `MustRunAsRange` and rejects it. Binding an SCC avoids forking the upstream pod spec. |
 | `RoleBinding` → SCC (disabled) | LWS | Present for symmetry and set `enabled: false`. Upstream's `runAsNonRoot: true` with no `runAsUser` passes `restricted-v2` unaided. |
-| `_validate.tpl` | llmisvc | Three render-time guards: the namespace must be `kserve` (the CRD hardcodes it), `kserveGateway` must be `<namespace>/<name>`, and `createGIECRDs` must stay `false`. All three are mistakes that produce a healthy-looking install and fail at first use. |
-| `values-inference-pool.yaml` | Envoy GW | Re-keyed copy of upstream's `examples/inference-pool/envoy-gateway-values-addon.yaml`. Adds `extensionManager.backendResources: InferencePool`, without which Envoy Gateway serves a 500 on every KServe route. |
-| `values-kserve.yaml` | AI GW | Widens the listener to `allowedRoutes.namespaces.from: All`, without which the `HTTPRoute`s KServe creates in model namespaces are rejected. |
+| `_validate.tpl` | llmisvc | Four render-time guards: the namespace must be `kserve` (the CRD hardcodes it), `kserveGateway` must be `<namespace>/<name>`, `createGIECRDs` must stay `false`, and the subchart's own presets must stay off (else every preset renders twice). All are mistakes that produce a healthy-looking install and fail at first use. |
+| 13 × `LLMInferenceServiceConfig` | llmisvc | Upstream's presets, re-rendered by the wrapper with sync wave 10 (see above). |
+| `extensionManager.backendResources` (a value, in `values.yaml`) | Envoy GW | Re-keyed copy of upstream's `examples/inference-pool/envoy-gateway-values-addon.yaml`. Adds `InferencePool`, without which Envoy Gateway serves a 500 on every KServe route. Was a `-f` overlay; now a default. |
+| `allowedRoutes.namespaces.from: All` (a value) | AI GW | Without it the `HTTPRoute`s KServe creates in model namespaces are rejected. Was a `-f` overlay; now a default. |
 
-### Moved out of Helm
+### CRDs: shipped in each wrapper's `crds/`
 
-| What | Where it went | Why |
-|---|---|---|
-| `gateway.envoyproxy.io` + `aigateway.envoyproxy.io` CRDs | `hack/install-crds.sh` (`helm template … \| oc apply --server-side`) | Helm 4 **server-side-applies** `crds/` content on install, so `crds.enabled=true` would overwrite the operator-owned Gateway API CRDs; and Helm does not template `crds/`, so no value can exclude them selectively. Upstream's separate `gateway-crds-helm` chart exists for exactly this and is what the script uses. |
-| `serving.kserve.io` CRDs | `hack/install-crds.sh`, from the vendored `kserve-llmisvc-crd` chart | Same reason, plus: this chart is not a dependency of anything here, so nothing else would install it. |
-| `inference.networking.k8s.io`, `inference.networking.x-k8s.io`, `llm-d.ai` CRDs | `hack/install-crds.sh`, rendered from `kserve-llmisvc-resources` with `createGIECRDs=true` | Rendering them from the controller's own chart means the CRD schemas always match the controller and there is no separate Gateway API Inference Extension or llm-d-router version to track. |
-| `leaderworkerset.x-k8s.io`, `disaggregatedset.x-k8s.io` CRDs | `hack/install-crds.sh`, via `helm show crds` on the vendored chart | They live in the chart's `crds/`, which `helm upgrade` never updates — a version bump would silently keep the old schemas. Install the chart with `--skip-crds`. |
-| Chart artifacts themselves | committed under `charts/*/charts/` and `hack/charts/` | So the whole install path, CRDs included, runs with no registry access. |
+Every CRD this stack owns is a file in a wrapper chart's `crds/`, generated by
+`hack/update-crds.sh` from the vendored upstream chart, one file per CRD, with
+exactly two annotations added: `argocd.argoproj.io/sync-wave: "-10"` and
+`argocd.argoproj.io/sync-options: ServerSideApply=true,Prune=false,Delete=false`.
+Everything else is upstream's text; `--check` fails on drift.
+
+| CRDs | Chart | Generated from | Why there |
+|---|---|---|---|
+| `gateway.envoyproxy.io` (8) | Envoy GW | `hack/charts/gateway-crds-helm` with `crds.gatewayAPI.enabled=false` | The subchart's own `crds/` would bring Gateway API experimental CRDs (section 3); upstream's separate CRD chart gates them, so the wrapper ships its filtered output instead. |
+| `inference.networking.k8s.io`, `inference.networking.x-k8s.io` (2) | Envoy GW | `kserve-llmisvc-resources` with `createGIECRDs=true` | Envoy Gateway watches `InferencePool` from startup (`backendResources`), so the CRD must be in the Application that syncs first. Rendered from KServe's chart so the schema always matches the controller. |
+| `aigateway.envoyproxy.io` (6) | AI GW | `hack/charts/ai-gateway-crds-helm` | Upstream ships AI Gateway's CRDs as a separate chart. |
+| `serving.kserve.io` (3) | kserve | `hack/charts/kserve-llmisvc-crd` | Upstream ships these as a separate chart that nothing here depends on. |
+| `llm-d.ai` (2) | kserve | `kserve-llmisvc-resources` with `createGIECRDs=true` | Same as the InferencePool pair; `createGIECRDs=false` keeps them out of `templates/`. |
+| `leaderworkerset.x-k8s.io`, `disaggregatedset.x-k8s.io` (3) | LWS | *not generated* — upstream's own `crds/` in the subchart | Already in `crds/` upstream; duplicating them would render each twice. |
+| Chart artifacts themselves | — | committed under `charts/*/charts/` and `hack/charts/` | So the whole install path, CRDs included, runs with no registry access. |
 
 ### How far this is from upstream, measured
 
@@ -1210,21 +1348,20 @@ a fresh `helm pull`); nothing is forked.
 | Objects byte-identical to upstream | **16 of 17** (ignoring the informational `helm.sh/chart` label, which is in no selector) |
 | Objects functionally different | **1** — `ConfigMap/envoy-gateway-config`, where every override lands |
 | Objects added | 1 — the SCC `RoleBinding` |
-| Objects dropped | 23 — 21 CRDs + the 2 `safe-upgrades` admission-policy objects |
+| Objects dropped | 23 — 21 CRDs + the 2 `safe-upgrades` admission-policy objects (8 of those CRDs come back via the wrapper's `crds/`, filtered to `gateway.envoyproxy.io`) |
 
-For `ai-gateway-helm`: 76 upstream leaf values, **0** overridden, 1 added,
-**100%** of upstream's own values kept.
+For `ai-gateway-helm`: 76 upstream leaf values, **1** overridden (cert-manager,
+for Argo CD), 1 added.
 
-So the whole Envoy Gateway delta is **one ConfigMap, one RoleBinding, and not
-installing CRDs**. Everything else is upstream verbatim.
+So the whole Envoy Gateway delta is **one ConfigMap, one RoleBinding, and
+shipping only its own CRDs**. Everything else is upstream verbatim.
 
 The three charts added later are closer still:
 
 | Chart | Overridden / upstream leaf values | Objects added | Objects dropped |
 |---|---|---|---|
-| `lws-openshift` | **0** / 24 (100% kept) | 0 (the SCC binding is off) | 3 CRDs |
-| `kserve-llmisvc-openshift` | 5 / 151 (97% kept) | 1 — the SCC `RoleBinding` | 4 CRDs |
-| `kserve-runtime-configs-openshift` | 1 / 158 (99% kept) | 0 | 0 |
+| `lws-openshift` | **0** / 24 (100% kept) | 0 (the SCC binding is off) | 0 |
+| `kserve-llmisvc-openshift` | 5 / 151 + **0** / 158 | 1 — the SCC `RoleBinding` (+ the 13 presets, re-rendered) | 0 — the 4 CRDs `createGIECRDs=false` drops come back via `crds/` |
 
 `lws-openshift` needs no alias and no `nameOverride`: the upstream chart is
 already named `lws`, which is lowercase and DNS-safe, so `.Chart.Name` — and
@@ -1264,6 +1401,11 @@ from the upgrade steps:
   upgrade.
 * **Hook weights.** Upstream's certgen RBAC sits at `-1` and the certgen Job at
   `0`; the SCC binding must stay below both, or certgen fails SCC admission.
+  Argo CD maps these hooks to `PreSync` with the same weights.
+* **`crds/` is generated.** After any bump run `hack/update-crds.sh` and review
+  `git diff -- 'charts/*/crds'`; `--check` fails if it was forgotten. Keep every
+  file under Helm's 5 MiB per-file limit — which is why it writes one CRD per
+  file.
 
 ### Worth raising upstream
 
@@ -1306,7 +1448,8 @@ oc get pods -n envoy-gateway-system -o custom-columns='NAME:.metadata.name,SCC:.
 
 **Gateway stuck `PROGRAMMED=False`.**
 Envoy Gateway cannot reach the AI Gateway extension hook. Confirm the controller
-is up, then restart Envoy Gateway (step 5).
+is up, then restart Envoy Gateway (plain Helm step 3; under Argo CD the Gateway's
+wave 2 normally prevents this).
 ```bash
 oc logs -n envoy-gateway-system deploy/envoy-gateway | grep -i 'extension\|hook'
 ```
@@ -1340,8 +1483,8 @@ oc get pods -n envoy-gateway-system -l gateway.envoyproxy.io/owning-gateway-name
 **`failed to process ParametersRef for GatewayClass` in the Envoy Gateway log.**
 The `GatewayClass` points at an `EnvoyProxy` that does not exist. Benign and
 self-healing if it appears only in a short burst while the `EnvoyProxy` is being
-recreated — a fresh `helm install` produces none, because Helm creates
-`EnvoyProxy` before `GatewayClass`. If it repeats continuously, the
+recreated — a fresh install produces none, because `EnvoyProxy` is created
+before `GatewayClass` (Helm's kind order; Argo CD's wave 0 before wave 1). If it repeats continuously, the
 `parametersRef` namespace/name is genuinely wrong:
 
 ```bash
@@ -1365,14 +1508,22 @@ Expected until an `AIGatewayRoute` attaches to the Gateway. An
 `LLMInferenceService` does not inject it — it uses an `InferencePool` ext_proc
 cluster instead, which lives in the Envoy config, not as a sidecar.
 
-**`helm install` of the KServe chart fails with "this chart must be installed in namespace "kserve"".**
+**The KServe chart fails to render with "this chart must be installed in namespace "kserve"".**
 Working as intended — see section 6. The CRD's conversion webhook is hardcoded
-to that namespace upstream.
+to that namespace upstream. Under Argo CD this shows as a `ComparisonError`:
+set the Application's destination namespace to `kserve`.
+
+**`LLMInferenceServiceConfig` rejected: `failed calling webhook ... no endpoints available`.**
+The presets were applied before the controller was Ready. Under Argo CD that
+means the wave-10 annotation is missing (check `runtimeConfigs` and that the
+subchart's own `llmisvcConfigs.enabled` is `false`); with plain Helm, install
+with `runtimeConfigs.enabled=false` first — see
+[Plain Helm](#plain-helm-alternative).
 
 **`helm lint` on the KServe chart logs `funcMap fail ... must be installed in namespace "kserve"`.**
 `helm lint` renders with namespace `default`. Lint with `-n kserve`:
 ```bash
-helm lint charts/kserve-llmisvc-openshift charts/kserve-runtime-configs-openshift -n kserve
+helm lint charts/kserve-llmisvc-openshift -n kserve
 ```
 
 **`llmisvc-controller-manager` never goes Ready.**
@@ -1384,10 +1535,11 @@ oc get deploy -n cert-manager
 ```
 
 **`Group is invalid, only the core API group ... are supported` in the Envoy Gateway log, and routes return 500.**
-`extensionManager.backendResources` is missing — install the Envoy Gateway chart
-with `-f charts/envoy-gateway-openshift/values-inference-pool.yaml`. Remember
-that `helm upgrade` does not remember `-f` flags, so an upgrade without it
-reverts the setting.
+`extensionManager.backendResources` is missing. It is a default in
+`charts/envoy-gateway-openshift/values.yaml` — check that no value file or
+Application parameter overrides `extensionManager`, and that the InferencePool
+CRD existed when Envoy Gateway started (it ships in the same chart at wave -10;
+if it was added later, restart `deployment/envoy-gateway`).
 ```bash
 oc get cm envoy-gateway-config -n envoy-gateway-system \
   -o jsonpath='{.data.envoy-gateway\.yaml}' | grep -A3 backendResources
@@ -1406,8 +1558,8 @@ kill %1
 
 **`HTTPRoute` reports `NotAllowedByListeners`.**
 The Gateway listener is still `allowedRoutes.namespaces.from: Same` and the
-model is in another namespace. Reinstall the AI Gateway chart with
-`-f charts/envoy-ai-gateway-openshift/values-kserve.yaml`.
+model is in another namespace. The chart default is `All`; look for an
+overriding value file or Application parameter.
 
 **`LLMInferenceService` stuck with `InferencePoolReady=False / WaitingForGateway`.**
 Observed on this stack even when routing is fully working: Envoy Gateway v1.9.1
@@ -1445,8 +1597,21 @@ and `InferencePool` are orphaned when the controller goes.
 
 ```bash
 oc get llminferenceservice -A          # must be empty before continuing
+```
 
-helm uninstall kserve-runtime-configs -n kserve
+**Argo CD:** delete the Applications in reverse sync order — `kserve-llmisvc`,
+`lws`, `envoy-ai-gateway`, `envoy-gateway` — then the namespaces. With the
+`resources-finalizer.argocd.argoproj.io` finalizer (cascade delete) Argo CD
+removes everything each Application rendered **except the CRDs this repo
+generates**, which carry `Delete=false`. The three **LWS CRDs** are upstream's
+unannotated copies: a cascade delete of the `lws` Application removes them, and
+every `LeaderWorkerSet` on the cluster with them. Delete that Application
+non-cascading (`argocd app delete lws --cascade=false`) if anything else might
+use LWS.
+
+**Plain Helm:**
+
+```bash
 helm uninstall kserve-llmisvc         -n kserve
 helm uninstall lws                    -n lws-system
 helm uninstall envoy-ai-gateway       -n envoy-ai-gateway-system
@@ -1459,7 +1624,8 @@ GatewayClass, the `default` `ClusterStorageContainer`, their RBAC and their
 webhook configurations. Deleting the namespaces also clears the hook
 RoleBindings that `helm uninstall` leaves behind.
 
-CRDs are deliberately **not** removed — deleting a CRD deletes every object of
+Either way, CRDs are deliberately **not** removed (Helm never deletes `crds/`;
+Argo CD honours `Delete=false`) — deleting a CRD deletes every object of
 that type cluster-wide, and on a shared cluster that may not be only yours. To
 remove them explicitly, once you are sure nothing else uses them:
 
@@ -1580,7 +1746,7 @@ Compatibility of v1.9.1 with everything KServe needs was checked rather than
 assumed:
 
 * `ExtensionManager.BackendResources` — the field
-  `values-inference-pool.yaml` sets — exists in **both** v1.8.1 and v1.9.1
+  `values.yaml` sets — exists in **both** v1.8.1 and v1.9.1
   (`api/v1alpha1/envoygateway_types.go`).
 * Envoy AI Gateway v1.1.0, which KServe pins, runs against v1.9.1: the Gateway
   reaches `PROGRAMMED=True` and the `InferencePool` ext_proc cluster appears in

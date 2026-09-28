@@ -19,9 +19,19 @@ That listener must accept routes from the model's namespace:
   oc get gateway {{ (splitList "/" $gw) | last }} -n {{ (splitList "/" $gw) | first }} \
     -o jsonpath='{.spec.listeners[*].allowedRoutes.namespaces.from}{"\n"}'
 
-`Same` will not work for models outside {{ (splitList "/" $gw) | first }} -- reinstall the AI
-Gateway chart with -f charts/envoy-ai-gateway-openshift/values-kserve.yaml.
+`Same` will not work for models outside {{ (splitList "/" $gw) | first }}; the AI Gateway
+chart defaults to `All`.
+{{- if .Values.runtimeConfigs.enabled }}
 
-Next: install charts/kserve-runtime-configs-openshift, which supplies the
-LLMInferenceServiceConfig presets that an LLMInferenceService refers to through
-spec.baseRefs. Without them only fully inline specs work.
+LLMInferenceServiceConfig presets (spec.baseRefs targets), 13 expected:
+
+  oc get llminferenceserviceconfig -n {{ .Release.Namespace }}
+
+Their vLLM and llm-d images are hardcoded upstream and cannot be overridden by
+any value; in a disconnected cluster only the ImageDigestMirrorSet that
+`oc mirror` generates from mirror-config.yaml redirects them.
+{{- else }}
+
+runtimeConfigs.enabled=false: no LLMInferenceServiceConfig presets were
+rendered. With plain Helm, now `helm upgrade` with runtimeConfigs.enabled=true.
+{{- end }}

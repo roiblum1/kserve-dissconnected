@@ -14,14 +14,11 @@ restricted-v2. If the pod is stuck Pending with an SCC admission error, set
 openshift.securityContextConstraints.enabled=true.
 {{- end }}
 
-CRDs are NOT installed by this chart -- run hack/install-crds.sh, and install
-this chart with --skip-crds so Helm does not re-apply the subchart's copy:
-
-  helm install {{ .Release.Name }} charts/lws-openshift \
-    -n {{ .Release.Namespace }} --create-namespace --skip-crds
+CRDs come from the upstream lws subchart's own crds/ directory (Argo CD
+includes them by default -- do NOT set skipCrds on this Application):
 
   oc get crd leaderworkersets.leaderworkerset.x-k8s.io
 
-Next: install KServe's LLMInferenceService controller
+Next: sync KServe's LLMInferenceService stack
 (charts/kserve-llmisvc-openshift), which uses LeaderWorkerSet for multi-node
 model serving.

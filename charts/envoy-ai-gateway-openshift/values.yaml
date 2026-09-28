@@ -1,7 +1,19 @@
 # ---------------------------------------------------------------------------
 # envoy-ai-gateway-openshift
 #
-# `openshift:` and `gateway:` are added by this wrapper chart.
+# ONE Argo CD Application points at this directory. Order inside it:
+#
+#   wave -10  CRDs, from crds/  (aigateway.envoyproxy.io)
+#   wave  -5  SCC RoleBinding
+#   wave   0  AI Gateway controller, webhook Certificate, EnvoyProxy
+#   wave   1  GatewayClass
+#   wave   2  Gateway
+#   wave   3  OpenShift Route
+#
+# Needs, from the envoy-gateway-openshift Application: Envoy Gateway running
+# and its gateway.envoyproxy.io CRDs (EnvoyProxy). Needs cert-manager.
+#
+# `openshift:`, `argocd:` and `gateway:` are added by this wrapper chart.
 # `ai-gateway:` is passed straight through to the upstream `ai-gateway-helm`
 # v1.1.0 subchart.
 # ---------------------------------------------------------------------------
@@ -26,12 +38,13 @@ openshift:
 #
 # Only sync waves, and only for the resources THIS wrapper chart adds -- the
 # upstream subchart's resources cannot be annotated without forking its
-# templates, and do not need to be: they all belong in wave 0.
+# templates, and do not need to be: they all belong in wave 0. The CRDs in
+# crds/ carry wave -10 as a static annotation, because Helm never templates
+# crds/.
 #
 # Helm ignores these annotations completely, so a plain `helm install` behaves
 # exactly as before. Under Argo CD the numbers are relative, not absolute; only
-# their order matters. See argocd/application.yaml for the wave this whole
-# Application sits at, and README, "Deploying with Argo CD", for the table.
+# their order matters. See README, "Deploying with Argo CD", for the table.
 # ---------------------------------------------------------------------------
 argocd:
   syncWave:
@@ -101,7 +114,21 @@ gateway:
     protocol: HTTP
     allowedRoutes:
       namespaces:
-        from: Same
+        # OVERRIDE of this wrapper's own former default (`Same`), and REQUIRED
+        # with KServe (CLAUDE.md invariant 12). The llmisvc controller creates
+        # one HTTPRoute per LLMInferenceService in the MODEL's namespace, with
+        # this Gateway as parentRef; `Same` rejects every one of them as
+        # NotAllowedByListeners. `All` is what KServe's own dependency
+        # installer uses. To enumerate model namespaces instead, the whole
+        # allowedRoutes block is passed through verbatim:
+        #
+        #   allowedRoutes:
+        #     namespaces:
+        #       from: Selector
+        #       selector:
+        #         matchLabels:
+        #           kserve.io/inference: "true"
+        from: All
 
   # EnvoyProxy tunes the data plane that Envoy Gateway generates for this
   # Gateway.
@@ -175,8 +202,9 @@ gateway:
 # ---------------------------------------------------------------------------
 # Upstream ai-gateway-helm values
 #
-# This chart overrides ZERO upstream values and ADDS exactly one:
-# controller.mutatingWebhook.namespaceSelector. Everything else below is
+# This chart overrides ONE upstream value (controller.mutatingWebhook.
+# certManager.enable) and ADDS one: controller.mutatingWebhook.
+# namespaceSelector. Everything else below is
 # upstream's own default, repeated only so the knobs you are most likely to
 # reach for are visible without extracting the subchart -- deleting any of them
 # changes nothing.
@@ -218,6 +246,30 @@ ai-gateway:
       objectSelector:
         matchLabels:
           app.kubernetes.io/managed-by: envoy-gateway
+
+      certManager:
+        # OVERRIDE (upstream: false). REQUIRED under Argo CD.
+        #
+        # By default upstream mints the webhook certificate inside the
+        # template: `lookup` the existing Secret, else genCA/genSignedCert.
+        # `lookup` needs a live cluster connection; Argo CD renders in the
+        # repo-server, which has none, so it returns nil on EVERY render and a
+        # new CA and key are generated each time. Measured: two consecutive
+        # renders differ, only in that Secret. Under Argo CD that means an
+        # Application that is permanently OutOfSync and, with selfHeal, a
+        # webhook keypair rotated on every sync.
+        #
+        # cert-manager issues the same self-signed certificate from a real
+        # controller instead, so the render is deterministic (the Secret
+        # disappears, a Certificate and a selfSigned Issuer replace it).
+        # cert-manager is already a hard prerequisite of this stack for
+        # KServe's webhook, so this adds no new dependency.
+        enable: true
+        # Upstream defaults, restated so the objects this creates are visible:
+        # both live in the release namespace and write into the Secret the
+        # controller Deployment already mounts.
+        issuerName: self-signed-issuer-for-mutating-webhook
+        certificateName: self-signed-cert-for-mutating-webhook
 
   extProc:
     image:

@@ -1,0 +1,45 @@
+{{- /*
+The LLMInferenceServiceConfig presets that LLMInferenceService.spec.baseRefs
+resolves against -- the same 13 objects upstream's kserve-runtime-configs chart
+renders, read from that vendored subchart's own file via .Subcharts, so a
+version bump is still only a tarball swap.
+
+Why this wrapper renders them instead of letting the subchart do it: they must
+land in a LATER sync wave than the controller. The llmisvc subchart installs a
+ValidatingWebhookConfiguration for this kind with failurePolicy: Fail, and
+until the controller pod is Ready that webhook has no endpoints, so every one
+of these is rejected:
+
+  failed calling webhook "llminferenceserviceconfig.serving.kserve.io":
+  no endpoints available for service "llmisvc-webhook-server-service"
+
+Upstream's template is a bare .Files.Get with no annotation hook, and neither
+subchart offers a commonAnnotations value, so the only fork-free way to put a
+sync-wave on them is to render the file here. Argo CD waits for every resource
+of the earlier wave to be healthy -- the controller Deployment Available --
+before it applies this wave.
+
+The subchart's own copy stays disabled (kserve-runtime-configs.kserve.
+llmisvcConfigs.enabled: false); templates/_validate.tpl fails the render if both
+are on, which would emit every preset twice.
+*/ -}}
+{{- if .Values.runtimeConfigs.enabled }}
+{{- $sub := index .Subcharts "kserve-runtime-configs" }}
+{{- $raw := $sub.Files.Get "files/llmisvcconfigs/resources.yaml" }}
+{{- if not $raw }}
+{{- fail "kserve-runtime-configs subchart has no files/llmisvcconfigs/resources.yaml -- did its layout change on a version bump? See UPGRADE.md." }}
+{{- end }}
+{{- /* Upstream's own namespace rewrite, exactly as its template applies it. */}}
+{{- $raw = include "kserve-common.replaceNamespace" (list $raw .Release.Namespace) }}
+{{- $wave := toString .Values.argocd.syncWave.runtimeConfigs }}
+{{- range $doc := regexSplit "(?m)^---\\s*$" $raw -1 }}
+{{- $obj := fromYaml $doc }}
+{{- if and $obj $obj.kind }}
+{{- $meta := $obj.metadata }}
+{{- $ann := merge (dict "argocd.argoproj.io/sync-wave" $wave) ($meta.annotations | default dict) }}
+{{- $_ := set $meta "annotations" $ann }}
+---
+{{ toYaml $obj }}
+{{- end }}
+{{- end }}
+{{- end }}

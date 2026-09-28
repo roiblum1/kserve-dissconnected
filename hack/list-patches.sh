@@ -22,7 +22,7 @@ command -v python3 >/dev/null 2>&1 || { echo "!! python3 not found" >&2; exit 1;
 MODE="${1:-detail}"
 case "$MODE" in
   --summary) MODE=summary ;;
-  ""|--detail) MODE=detail ;;
+  detail|--detail) MODE=detail ;;
   -h|--help) awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"; exit 0 ;;
   *) echo "!! unknown argument: $MODE (try --help)" >&2; exit 2 ;;
 esac
@@ -32,11 +32,11 @@ import yaml, tarfile, glob, os, sys
 
 # wrapper dir, upstream subchart name, the values key it is passed under
 CHARTS = [
- ("envoy-gateway-openshift",         "gateway-helm",              "envoy-gateway"),
- ("envoy-ai-gateway-openshift",      "ai-gateway-helm",           "ai-gateway"),
- ("lws-openshift",                   "lws",                       "lws"),
- ("kserve-llmisvc-openshift",        "kserve-llmisvc-resources",  "kserve-llmisvc-resources"),
- ("kserve-runtime-configs-openshift","kserve-runtime-configs",    "kserve-runtime-configs"),
+ ("envoy-gateway-openshift",    "gateway-helm",              "envoy-gateway"),
+ ("envoy-ai-gateway-openshift", "ai-gateway-helm",           "ai-gateway"),
+ ("lws-openshift",              "lws",                       "lws"),
+ ("kserve-llmisvc-openshift",   "kserve-llmisvc-resources",  "kserve-llmisvc-resources"),
+ ("kserve-llmisvc-openshift",   "kserve-runtime-configs",    "kserve-runtime-configs"),
 ]
 mode = os.environ.get("MODE", "detail")
 
@@ -68,16 +68,17 @@ for wrapper, sub, key in CHARTS:
     over  = {k: (U[k], O[k]) for k in O if k in U and U[k] != O[k]}
     added = {k: O[k] for k in O if k not in U}
     same  = [k for k in O if k in U and U[k] == O[k]]
-    rows.append((wrapper, os.path.basename(hits[0]), len(U), len(over), len(added), len(same)))
-    detail[wrapper] = (over, added, same)
+    label = f"{wrapper} [{key}]" if sum(c[0] == wrapper for c in CHARTS) > 1 else wrapper
+    rows.append((label, os.path.basename(hits[0]), len(U), len(over), len(added), len(same)))
+    detail[label] = (over, added, same)
     tot_o += len(over); tot_a += len(added)
 
-print(f"{'WRAPPER CHART':34} {'upstream':>9} {'OVERRIDE':>9} {'ADDED':>6} {'restated':>9}")
-print("-" * 72)
+print(f"{'WRAPPER CHART':51} {'upstream':>9} {'OVERRIDE':>9} {'ADDED':>6} {'restated':>9}")
+print("-" * 89)
 for w, tgz, nu, no, na, ns in rows:
-    print(f"{w:34} {nu:>9} {no:>9} {na:>6} {ns:>9}")
-print("-" * 72)
-print(f"{'TOTAL':34} {'':>9} {tot_o:>9} {tot_a:>6}")
+    print(f"{w:51} {nu:>9} {no:>9} {na:>6} {ns:>9}")
+print("-" * 89)
+print(f"{'TOTAL':51} {'':>9} {tot_o:>9} {tot_a:>6}")
 print()
 print("Vendored subcharts:")
 for _, tgz, *_ in rows:

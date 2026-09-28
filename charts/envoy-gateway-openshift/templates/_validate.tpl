@@ -9,7 +9,7 @@ Render-time guards for the things that would damage a shared cluster.
      guard; check it first so the error names the root cause. Note gateway-helm
      v1.8.1 has no such key, which is why this chart requires v1.9.1. */}}
 {{- if dig "crds" "enabled" false $eg }}
-{{- fail "envoy-gateway.crds.enabled must be false: the crds subchart ships experimental-channel Gateway API CRDs that would overwrite the cluster-ingress-operator's. hack/install-crds.sh installs the gateway.envoyproxy.io group out of band." }}
+{{- fail "envoy-gateway.crds.enabled must be false: the crds subchart ships experimental-channel Gateway API CRDs that would overwrite the cluster-ingress-operator's. This chart's own crds/ carries the gateway.envoyproxy.io group, filtered by hack/update-crds.sh." }}
 {{- end }}
 
 {{/* The safe-upgrade ValidatingAdmissionPolicy intercepts every CRD write on

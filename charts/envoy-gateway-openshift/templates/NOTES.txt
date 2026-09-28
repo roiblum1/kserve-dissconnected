@@ -22,15 +22,17 @@ Envoy Gateway {{ .Chart.AppVersion }} is installing into namespace {{ .Release.N
 3. This release expects Envoy AI Gateway at
    {{ $eg.config.envoyGateway.extensionManager.service.fqdn.hostname }}:{{ $eg.config.envoyGateway.extensionManager.service.fqdn.port }}
 
-   Gateways will not be fully programmed until it is running. Install the
-   envoy-ai-gateway-openshift chart next, then restart this deployment:
+   Gateways will not be fully programmed until it is running. Sync the
+   envoy-ai-gateway-openshift Application next. Under Argo CD its Gateway is
+   created only after the AI Gateway controller is healthy, so no restart is
+   needed; with plain Helm, restart this deployment after installing it:
 
      oc rollout restart -n {{ .Release.Namespace }} deployment/envoy-gateway
 {{- end }}
 
-Reminder: this release does NOT manage Gateway API CRDs. They are owned by the
-OpenShift cluster-ingress-operator. `helm uninstall` will not remove them, and
-nothing in templates/ modifies them.
+CRDs: this chart's crds/ carries gateway.envoyproxy.io and the two
+InferencePool CRDs. It does NOT carry Gateway API CRDs -- those are owned by the
+OpenShift cluster-ingress-operator, and nothing in this chart modifies them.
 
 {{- $gw := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "gateways.gateway.networking.k8s.io" }}
 {{- if $gw }}
@@ -39,9 +41,9 @@ nothing in templates/ modifies them.
 {{- if eq $ch "experimental" }}
 
   !! Gateway API CRDs on this cluster now report channel "{{ $ch }}" ({{ $bv }}).
-     The upstream crds/ directory was applied -- you almost certainly ran
-     install/upgrade WITHOUT --skip-crds. That overwrote a cluster-scoped,
-     operator-owned, multi-tenant resource.
+     Something applied experimental Gateway API CRDs -- most likely the
+     upstream `crds` subchart was enabled (envoy-gateway.crds.enabled). That
+     overwrote a cluster-scoped, operator-owned, multi-tenant resource.
 
      Check and repair:
        oc get co ingress -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}'

@@ -1,11 +1,11 @@
 apiVersion: v2
 name: kserve-llmisvc-openshift
 description: >-
-  KServe's LLMInferenceService controller packaged for OpenShift. Wraps the
-  upstream kserve-llmisvc-resources chart, adds the SecurityContextConstraints
-  binding the controller needs, and keeps the cluster-scoped CRDs out of the
-  release so `helm uninstall` cannot take other tenants' custom resources with
-  it.
+  KServe's LLMInferenceService stack packaged for OpenShift and Argo CD: the
+  controller (upstream kserve-llmisvc-resources), the LLMInferenceServiceConfig
+  presets (upstream kserve-runtime-configs), the CRDs both need, and the
+  SecurityContextConstraints binding the controller needs. Point one Argo CD
+  Application at this directory; sync waves order everything inside it.
 type: application
 version: 0.1.0
 appVersion: "v0.21.0-rc1"
@@ -30,5 +30,14 @@ dependencies:
   # -rc1 artifacts on ghcr.io are byte-identical to the ones attached to the
   # v0.21.0 release. See UPGRADE.md, "KServe version labels".
   - name: kserve-llmisvc-resources
+    version: v0.21.0-rc1
+    repository: oci://ghcr.io/kserve/charts
+
+  # Upstream chart, vendored byte-identical under charts/. Used ONLY as the
+  # source of files/llmisvcconfigs/resources.yaml: its own template is disabled
+  # (llmisvcConfigs.enabled: false) and templates/llmisvcconfigs.yaml renders the
+  # same presets with a later sync wave, reading the file through .Subcharts.
+  # See that template for why. Same version as the controller, always.
+  - name: kserve-runtime-configs
     version: v0.21.0-rc1
     repository: oci://ghcr.io/kserve/charts

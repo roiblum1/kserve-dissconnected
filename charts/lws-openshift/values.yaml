@@ -1,6 +1,16 @@
 # ---------------------------------------------------------------------------
 # lws-openshift
 #
+# ONE Argo CD Application points at this directory, destination namespace
+# `lws-system` -- not optional: the upstream leaderworkersets CRD hardcodes its
+# conversion webhook to lws-webhook-service.lws-system, so LWS cannot share
+# the kserve Application's namespace.
+#
+# CRDs come from the upstream subchart's own crds/ (3 CRDs, no gate upstream),
+# which Argo CD renders by default. Nothing in this chart creates LWS custom
+# resources, so they need no earlier wave; KServe's controller does use them,
+# so sync this Application before kserve-llmisvc-openshift.
+#
 # `openshift:` is added by this wrapper chart.
 # `lws:` is passed straight through to the upstream `lws` v0.10.0 subchart.
 #

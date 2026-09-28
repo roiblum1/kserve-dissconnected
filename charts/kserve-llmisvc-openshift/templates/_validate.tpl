@@ -22,6 +22,13 @@ install and a broken one at first use, so it is cheaper to fail the render.
 {{/* 3. Leaving createGIECRDs on puts four cluster-scoped CRDs in templates/,
       which `helm uninstall` then deletes cluster-wide. */}}
 {{- if $sub.kserve.llmisvc.createGIECRDs }}
-{{- fail "kserve.llmisvc.createGIECRDs must stay false: it renders inferencepools/inferenceobjectives/inferencemodelrewrites CRDs into templates/, so `helm uninstall` would delete them and every custom resource of those kinds on the cluster. hack/install-crds.sh applies them out of band." }}
+{{- fail "kserve.llmisvc.createGIECRDs must stay false: it renders inferencepools/inferenceobjectives/inferencemodelrewrites CRDs into templates/, so `helm uninstall` would delete them and every custom resource of those kinds on the cluster. They ship as static files in crds/ instead (hack/update-crds.sh)." }}
+{{- end }}
+
+{{/* 4. The presets are rendered by templates/llmisvcconfigs.yaml with a sync
+      wave; the subchart's own copy would duplicate every one at wave 0. */}}
+{{- $rc := index .Values "kserve-runtime-configs" -}}
+{{- if and .Values.runtimeConfigs.enabled $rc.kserve.llmisvcConfigs.enabled }}
+{{- fail "set kserve-runtime-configs.kserve.llmisvcConfigs.enabled=false: this wrapper already renders the LLMInferenceServiceConfig presets (runtimeConfigs.enabled) with a later sync wave, and both on would emit every preset twice." }}
 {{- end }}
 {{- end -}}

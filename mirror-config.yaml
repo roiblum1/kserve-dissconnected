@@ -25,10 +25,10 @@
 # rewritten by any Helm value (see README, "Images that cannot be rewritten by
 # values").
 #
-# Helm charts are NOT listed here. All five wrapper charts vendor their
-# upstream subchart under charts/, and hack/install-crds.sh reads the CRD
-# charts from hack/charts/, so the repository is self-contained: nothing in the
-# install path reaches a chart registry.
+# Helm charts are NOT listed here. All four wrapper charts vendor their
+# upstream subcharts under charts/ and carry their CRDs in crds/ (generated
+# from hack/charts/ by hack/update-crds.sh), so the repository is
+# self-contained: nothing in the install path reaches a chart registry.
 #
 # Keeping this file correct:
 #
@@ -49,9 +49,9 @@ mirror:
     channels: []
 
   operators:
-    # cert-manager is a hard prerequisite: the kserve-llmisvc chart creates a
-    # cert-manager Certificate and Issuer for its webhook, and the controller
-    # never goes Ready without them. hack/install-crds.sh checks for it.
+    # cert-manager is a hard prerequisite: the kserve-llmisvc and
+    # envoy-ai-gateway charts both create cert-manager Certificates and Issuers
+    # for their webhooks, and the controllers never go Ready without them.
     #
     # DELETE this block if the disconnected cluster already has cert-manager --
     # mirroring an operator catalog is by far the largest item here.
@@ -92,7 +92,7 @@ mirror:
 
     # -- KServe LLM runtime presets ------------------------------------------
     # Hardcoded inside the LLMInferenceServiceConfig objects that
-    # kserve-runtime-configs-openshift installs. NOT overridable by any Helm
+    # kserve-llmisvc-openshift installs (sync wave 10). NOT overridable by any Helm
     # value: the ImageDigestMirrorSet is the only way to redirect them.
     #
     # vLLM server for GPU model serving.

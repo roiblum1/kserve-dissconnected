@@ -496,10 +496,11 @@ wave 10 do under Argo CD.
   sidecar appears only as `--extProcImage=` on the AI Gateway controller (the
   webhook injects it at pod-creation time), and some refs are unqualified
   (`kserve/...`) upstream.
-* `mirror-config.yaml` entries use **tags**, with digests in trailing comments
-  for verification. Mirroring a tag copies the manifest it points at, so a
-  chart that pins `...@sha256:...` still resolves against the mirror, and
-  `--check` therefore compares on `repo:tag` only.
+* `mirror-config.yaml` is a **minimal list of tags**: one short comment per
+  group, no per-image comments, no digests (`hack/list-images.sh --annotate`
+  prints them on demand; explanations belong in the README). Mirroring a tag
+  copies the manifest it points at, so a chart that pins `...@sha256:...`
+  still resolves against the mirror, and `--check` compares on `repo:tag` only.
 * **Never hand-edit `charts/*/crds/`.** Those files are generated; change
   `hack/update-crds.sh` and regenerate. `--check` fails on any hand edit.
 * **Never add Argo CD `Application` manifests to this repo.** The user creates

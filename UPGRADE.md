@@ -539,7 +539,8 @@ check rather than editing by hand:
 ```
 
 If it fails it prints the difference. Add or remove the named entries in
-`mirror-config.yaml`, then refresh the digest comments:
+`mirror-config.yaml`. To see the digest each tag resolves to (for review;
+the file itself lists tags only):
 
 ```bash
 ./hack/list-images.sh --annotate
@@ -784,7 +785,7 @@ Values
 
 Mirror
 
-- [ ] `hack/list-images.sh --check` passes; digest comments refreshed
+- [ ] `hack/list-images.sh --check` passes
 - [ ] cert-manager operator catalog tag matches the cluster's OpenShift minor
 - [ ] Images mirrored and the IDMS/ITMS applied **before** the rollout
 

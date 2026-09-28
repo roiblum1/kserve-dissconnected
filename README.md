@@ -860,7 +860,7 @@ The list is derived from the charts, not maintained by hand:
 ```bash
 ./hack/list-images.sh            # what the charts actually reference
 ./hack/list-images.sh --check    # exits 1 if mirror-config.yaml has drifted
-./hack/list-images.sh --annotate # re-resolve the digests in the comments
+./hack/list-images.sh --annotate # each image with the digest its tag resolves to
 ```
 
 `--check` compares on `repo:tag`, ignoring digests, because the charts pin some

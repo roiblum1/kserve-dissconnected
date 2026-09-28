@@ -8,6 +8,11 @@
 #   hack/list-images.sh --check               # diff against mirror-config.yaml
 #   hack/list-images.sh --annotate            # list with resolved digests
 #
+# --check applies hack/mirror-overrides.yaml first: deliberate substitutions
+# and extra images that are mirrored on purpose. It still fails if the charts
+# move to a reference that is neither mirrored nor declared there, which is the
+# point of the gate.
+#
 # Nothing is hardcoded here: every reference comes out of `helm template`. Two
 # extraction quirks this exists to handle:
 #   * the ext_proc sidecar appears only as `--extProcImage=<ref>` on the AI
@@ -69,7 +74,25 @@ case "${1:-}" in
     trap 'rm -f "$tmp_have" "$tmp_want"' EXIT
     # Compare on repo:tag, ignoring any @sha256 suffix, because
     # mirror-config.yaml lists tags and the charts sometimes pin digests.
-    images | sed 's/@sha256:.*//' | sort -u >"$tmp_want"
+    # Chart-derived list, with hack/mirror-overrides.yaml applied so the
+    # comparison is against what we intend to mirror, not only what upstream
+    # names. See that file for why each deviation exists.
+    images | sed 's/@sha256:.*//' | python3 -c '
+import sys, os, yaml
+path = "hack/mirror-overrides.yaml"
+ov = (yaml.safe_load(open(path)) or {}) if os.path.exists(path) else {}
+replace = ov.get("replace") or {}
+extra = ov.get("extra") or []
+out = {replace.get(ref, ref) for ref in (l.strip() for l in sys.stdin) if ref}
+# A replacement whose target is absent means its source was never in the
+# chart-derived list, i.e. the entry is stale -- usually a version bump.
+stale = sorted(k for k in replace if replace[k] not in out)
+if stale:
+    sys.exit("!! hack/mirror-overrides.yaml replaces images no chart references "
+             "any more: " + ", ".join(stale) + "\n"
+             "   A version bump probably moved them. Update or drop the entry.")
+print("\n".join(sorted(out | set(extra))))
+' | sort -u >"$tmp_want"
     python3 -c '
 import sys, yaml
 d = yaml.safe_load(open("mirror-config.yaml"))
@@ -83,7 +106,9 @@ for e in (d["mirror"].get("additionalImages") or []):
       diff -u "$tmp_have" "$tmp_want" | tail -n +4
       echo
       echo "Images the charts reference but mirror-config.yaml omits would not be"
-      echo "mirrored and would fail to pull on a disconnected cluster."
+      echo "mirrored and would fail to pull on a disconnected cluster. If a"
+      echo "difference is deliberate, declare it in hack/mirror-overrides.yaml"
+      echo "rather than editing mirror-config.yaml alone."
       exit 1
     fi
     ;;

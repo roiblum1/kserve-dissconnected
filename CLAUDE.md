@@ -496,6 +496,21 @@ wave 10 do under Argo CD.
   sidecar appears only as `--extProcImage=` on the AI Gateway controller (the
   webhook injects it at pod-creation time), and some refs are unqualified
   (`kserve/...`) upstream.
+* A deliberate difference between the charts and the mirror goes in
+  `hack/mirror-overrides.yaml`, never into `mirror-config.yaml` alone —
+  `replace:` for a local build standing in for an upstream image, `extra:` for
+  something mirrored that no chart references. `--check` applies them first, so
+  it still fails when a version bump moves an image, and it also fails on a
+  `replace:` entry whose source no chart references any more. Editing
+  `mirror-config.yaml` on its own leaves `--check` failing forever, and a gate
+  that always fails is a gate nobody reads.
+* **A mirror map cannot rename a tag.** `ImageDigestMirrorSet` and
+  `ImageTagMirrorSet` rewrite the registry and repository and keep the tag, so
+  mirroring `myrepo/thing:2.0` does not redirect a chart that asks for
+  `upstream/thing:1.0`. For the preset images, which no Helm value reaches
+  either, set the image on the `LLMInferenceService` (`spec.template` wins over
+  `spec.baseRefs`) or publish the substitute under the tag the preset asks for.
+  See README, "Substituting a preset image".
 * `mirror-config.yaml` is a **minimal list of tags**: one short comment per
   group, no per-image comments, no digests (`hack/list-images.sh --annotate`
   prints them on demand; explanations belong in the README). Mirroring a tag

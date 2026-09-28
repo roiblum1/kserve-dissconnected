@@ -35,6 +35,7 @@ Verified end-to-end on OpenShift 4.22.13 / Kubernetes v1.35.6.
 | `hack/update-crds.sh` | Regenerates every chart's `crds/` from the vendored upstream charts; `--check` fails on drift |
 | `hack/install-crds.sh` | Plain-Helm path only: applies the committed `crds/` (`helm upgrade` never does) |
 | `hack/list-images.sh` | Derives the mirror list from the charts; `--check` fails on drift |
+| `hack/mirror-overrides.yaml` | Deliberate chart-vs-mirror differences, so `--check` stays a real gate |
 | `hack/list-patches.sh` | Derives every value change from the vendored subcharts |
 | `hack/resolve-digest.sh` | Resolves an image digest without pulling |
 | `mirror-config.yaml` | `oc mirror` v2 `ImageSetConfiguration` for the whole stack |
@@ -796,7 +797,7 @@ sidecar into the Envoy pod (it is absent until then, which is normal).
 
 This is the intended deployment target. `mirror-config.yaml` is an
 [`oc mirror` v2](https://docs.openshift.com/container-platform/latest/disconnected/mirroring/about-installing-oc-mirror-v2.html)
-`ImageSetConfiguration` covering the whole stack: **14 images** plus the
+`ImageSetConfiguration` covering the whole stack: **15 images** plus the
 cert-manager operator.
 
 ```bash
@@ -817,11 +818,11 @@ not needed on this path.
 
 ### Why the mirror map, and not just chart values
 
-Six of the fourteen images are baked into the `LLMInferenceServiceConfig`
-presets that `kserve-runtime-configs` installs:
+Six of them are baked into the `LLMInferenceServiceConfig` presets that
+`kserve-runtime-configs` installs:
 
 ```
-ghcr.io/llm-d/llm-d-cuda:v0.9.0
+ghcr.io/llm-d/llm-d-cuda:v0.9.0          <- substituted, see below
 ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.10.0
 ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0
 ghcr.io/llm-d/llm-d-latency-predictor-prediction-server:0.9.0
@@ -834,6 +835,51 @@ value hooks — `global.imageRegistry` does not reach them and neither does
 anything else. A cluster-level mirror map is the only mechanism that can
 redirect them, which is why this repo ships an `ImageSetConfiguration` rather
 than a list of images and a set of registry overrides.
+
+### Substituting a preset image
+
+`mirror-config.yaml` mirrors `docker.io/roi12345/vllm-llmd:0.30.0-r1` in place
+of the `ghcr.io/llm-d/llm-d-cuda:v0.9.0` the presets name, and additionally
+mirrors `docker.io/roi12345/doca-ofed-driver:doca3.5.0-…`, a node-level
+NVIDIA DOCA/OFED driver no chart references. Both are declared in
+[`hack/mirror-overrides.yaml`](hack/mirror-overrides.yaml) so
+`hack/list-images.sh --check` keeps gating the other 13 instead of failing
+forever.
+
+**Mirroring the substitute is not enough to make it run.** A mirror map
+rewrites the registry and repository but keeps the tag:
+
+```
+source:  ghcr.io/llm-d/llm-d-cuda:v0.9.0
+ITMS  ->  REGISTRY.EXAMPLE.COM/llm-d/llm-d-cuda:v0.9.0
+```
+
+so it cannot reach a substitute whose tag is `0.30.0-r1`. Two paths that do
+work, in order of preference:
+
+1. **Set the image on the `LLMInferenceService`.** `spec.template` is a
+   PodSpec, and whatever it sets wins over the preset it inherits through
+   `spec.baseRefs`. This is per-model, needs no cluster-wide change and does
+   not touch the charts:
+
+   ```yaml
+   spec:
+     baseRefs:
+       - name: kserve-config-llm-template
+     template:
+       containers:
+         - name: main
+           image: docker.io/roi12345/vllm-llmd:0.30.0-r1
+   ```
+
+2. **Push the substitute under the tag the preset asks for**, i.e. as
+   `<mirror>/llm-d/llm-d-cuda:v0.9.0`, and let the `ImageTagMirrorSet` do the
+   rest. Cluster-wide and invisible in any manifest, so prefer option 1 unless
+   every model on the cluster must use the substitute.
+
+Editing the preset itself is the third option and this repo does not take it —
+the presets are rendered from the vendored subchart's own file, so a fork would
+have to be re-applied on every version bump.
 
 ### Charts are vendored, not mirrored
 

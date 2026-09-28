@@ -786,6 +786,8 @@ Values
 Mirror
 
 - [ ] `hack/list-images.sh --check` passes
+- [ ] `hack/mirror-overrides.yaml` reconciled — a bump that moves a substituted
+      image makes `--check` name the stale `replace:` entry
 - [ ] cert-manager operator catalog tag matches the cluster's OpenShift minor
 - [ ] Images mirrored and the IDMS/ITMS applied **before** the rollout
 

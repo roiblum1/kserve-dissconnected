@@ -1,60 +1,13 @@
-# ---------------------------------------------------------------------------
-# oc-mirror v2 ImageSetConfiguration for the Envoy AI Gateway + KServe
-# LLMInferenceService stack.
-#
-# Prepare on the connected side:
-#
-#   oc mirror -c mirror-config.yaml file://mirror --v2
-#
-# Move mirror/ across, then on the disconnected side:
-#
-#   oc mirror -c mirror-config.yaml \
-#     --from file://mirror docker://REGISTRY.EXAMPLE.COM --v2
-#
-# oc-mirror writes an ImageDigestMirrorSet (and an ImageTagMirrorSet) into
-# working-dir/cluster-resources/. Apply those to the cluster BEFORE installing
-# the charts:
-#
-#   oc apply -f working-dir/cluster-resources/idms-oc-mirror.yaml
-#   oc apply -f working-dir/cluster-resources/itms-oc-mirror.yaml
-#
-# Once they are applied, every image reference below resolves to the mirror for
-# every pod on the cluster, and the charts install unmodified -- no
-# values-mirror.yaml needed. That matters here because six of these images are
-# hardcoded inside KServe's LLMInferenceServiceConfig presets and cannot be
-# rewritten by any Helm value (see README, "Images that cannot be rewritten by
-# values").
-#
-# Helm charts are NOT listed here. All four wrapper charts vendor their
-# upstream subcharts under charts/ and carry their CRDs in crds/ (generated
-# from hack/charts/ by hack/update-crds.sh), so the repository is
-# self-contained: nothing in the install path reaches a chart registry.
-#
-# Keeping this file correct:
-#
-#   hack/list-images.sh --check       # fails if the charts and this file diverge
-#   hack/list-images.sh --annotate    # re-resolve the digests in the comments
-#
-# Digests are recorded in the trailing comments for verification only; the
-# entries themselves use tags so a version bump stays a one-line edit.
-# Mirroring a tag copies the manifest it points at, so a chart that pins
-# `...@sha256:...` still resolves against the mirror.
-# ---------------------------------------------------------------------------
+# oc-mirror v2 image set for the whole stack. Usage: README, "Disconnected".
+# Keep in sync with the charts: hack/list-images.sh --check
 kind: ImageSetConfiguration
 apiVersion: mirror.openshift.io/v2alpha1
-
 mirror:
   platform:
-    # The cluster already exists; no OpenShift release payload to mirror.
     channels: []
 
+  # Prerequisite. Delete if the cluster already has cert-manager.
   operators:
-    # cert-manager is a hard prerequisite: the kserve-llmisvc and
-    # envoy-ai-gateway charts both create cert-manager Certificates and Issuers
-    # for their webhooks, and the controllers never go Ready without them.
-    #
-    # DELETE this block if the disconnected cluster already has cert-manager --
-    # mirroring an operator catalog is by far the largest item here.
     - catalog: registry.redhat.io/redhat/redhat-operator-index:v4.22
       packages:
         - name: openshift-cert-manager-operator
@@ -62,54 +15,26 @@ mirror:
             - name: stable-v1
 
   additionalImages:
-    # -- Envoy Gateway v1.9.1 ------------------------------------------------
-    # NOT KServe's pinned v1.8.1 -- see README, "Why Envoy Gateway is v1.9.1
-    # and not KServe's v1.8.1". v1.8.1 cannot start on a cluster with
-    # standard-channel Gateway API.
-    # Control plane, certgen Job and shutdown-manager all use this one image.
-    - name: docker.io/envoyproxy/gateway:v1.9.1                                      # sha256:0049bcb384c591c6a6dd043fe5c9929ef6e74f230e12dd678d2d3701df9b301e
-    # Envoy data plane. Pinned by digest in the chart's values.yaml.
-    - name: docker.io/envoyproxy/envoy:distroless-v1.39.1                            # sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4
-    # Only pulled if Envoy Gateway rate limiting is turned on. Cheap to keep.
-    - name: docker.io/envoyproxy/ratelimit:8fe6ea42                                  # sha256:a61547259607d40aff153050c2a87873ca1676d1d9f5f06937d412000dcc2df1
+    # Envoy Gateway v1.9.1
+    - name: docker.io/envoyproxy/gateway:v1.9.1
+    - name: docker.io/envoyproxy/envoy:distroless-v1.39.1
+    - name: docker.io/envoyproxy/ratelimit:8fe6ea42
 
-    # -- Envoy AI Gateway v1.1.0 ---------------------------------------------
-    - name: docker.io/envoyproxy/ai-gateway-controller:v1.1.0                        # sha256:e7662d3502ad894b5937e6747998449892219778299bc2e612baed93ad17418b
-    # Injected into the Envoy data-plane pods by the AI Gateway mutating
-    # webhook, so it never appears in `helm template` output as an image: key --
-    # only as --extProcImage= on the controller.
-    - name: docker.io/envoyproxy/ai-gateway-extproc:v1.1.0                           # sha256:a6633382aed19905d81ae36c4bd1637499ce56af4c510f9f4b9f080b2139c845
+    # Envoy AI Gateway v1.1.0
+    - name: docker.io/envoyproxy/ai-gateway-controller:v1.1.0
+    - name: docker.io/envoyproxy/ai-gateway-extproc:v1.1.0
 
-    # -- LeaderWorkerSet v0.10.0 ---------------------------------------------
-    # The version KServe v0.21.0 pins. Do not bump independently.
-    - name: registry.k8s.io/lws/lws:v0.10.0                                          # sha256:46b1f3b6090d6983a0eab5b80385018d8ea74155ec09a67a17a2cf492d48aa4c
+    # LeaderWorkerSet v0.10.0
+    - name: registry.k8s.io/lws/lws:v0.10.0
 
-    # -- KServe LLMInferenceService v0.21.0-rc1 (== v0.21.0) ------------------
-    - name: docker.io/kserve/llmisvc-controller:v0.21.0-rc1                          # sha256:7bbf49dc8fbd450cb14a7fa5ed879cb21d8346104f777d6f41ab06d28c25b48a
-    # Init container that fetches model weights, from the `default`
-    # ClusterStorageContainer.
-    - name: docker.io/kserve/storage-initializer:v0.21.0-rc1                         # sha256:b2ee126474412d01be4b9184aa652718d21d1b59178ab49b7e8d78d2544b1e9d
+    # KServe v0.21.0
+    - name: docker.io/kserve/llmisvc-controller:v0.21.0-rc1
+    - name: docker.io/kserve/storage-initializer:v0.21.0-rc1
 
-    # -- KServe LLM runtime presets ------------------------------------------
-    # Hardcoded inside the LLMInferenceServiceConfig objects that
-    # kserve-llmisvc-openshift installs (sync wave 10). NOT overridable by any Helm
-    # value: the ImageDigestMirrorSet is the only way to redirect them.
-    #
-    # vLLM server for GPU model serving.
-    - name: ghcr.io/llm-d/llm-d-cuda:v0.9.0                                          # sha256:094fb7bc018af54cb6a93999f72b0f38b7c89960f285f3718fbd95adc192fc27
-    # Endpoint picker (the InferencePool ext_proc) and the prefill/decode
-    # disaggregation sidecar.
-    - name: ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.10.0                       # sha256:2e516fa1310da7be59b82beb1445362139597d6d553ef04d546716abe3aaaa70
-    - name: ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0                        # sha256:fe7b0bbd09be6695e094ba9a512fb947532c28c6c3565408c8c28a9dc5423da0
-    # Latency-predictor preset (kserve-config-llm-scheduler-latency-predictor).
-    - name: ghcr.io/llm-d/llm-d-latency-predictor-prediction-server:0.9.0            # sha256:7377707db2efac33fed3740b3d541bd4c045b240195e03453a6e33e86d69eba3
-    - name: ghcr.io/llm-d/llm-d-latency-predictor-training-server:0.9.0              # sha256:5679d69a8603fb555578c5b5e319eb856acda058ddee1355e5d3b1f662701761
-    # CPU vLLM, used by the tokenizer preset only. Replaced the
-    # llm-d-uds-tokenizer image that KServe v0.20.0 used.
-    - name: docker.io/vllm/vllm-openai-cpu:v0.23.0                                   # sha256:89e1fbe829038b1a560601990c8ec89625c622a969fcbc8f10ce48b6139795be
-
-    # -- Not installed by these charts ---------------------------------------
-    # Uncomment only if you also install the main kserve-resources chart, which
-    # serves classic InferenceService. LLMInferenceService does not use them.
-    # - name: docker.io/kserve/router:v0.21.0-rc1                                    # sha256:fa5afcb757ab667152d958ee260d00740dbb2bfa246a37cebe98174fe7c29324
-    # - name: docker.io/kserve/agent:v0.21.0-rc1                                     # sha256:105b789a73adfbc299162adad66e0e444dae631c9cea7a8db137263941e26cb5
+    # KServe runtime presets (hardcoded upstream; only the IDMS redirects them)
+    - name: ghcr.io/llm-d/llm-d-cuda:v0.9.0
+    - name: ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.10.0
+    - name: ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0
+    - name: ghcr.io/llm-d/llm-d-latency-predictor-prediction-server:0.9.0
+    - name: ghcr.io/llm-d/llm-d-latency-predictor-training-server:0.9.0
+    - name: docker.io/vllm/vllm-openai-cpu:v0.23.0

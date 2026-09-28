@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------------------
+# Argo CD Application: the LLMInferenceServiceConfig presets.
+#
+# Sync wave 30, and the wave is load-bearing (CLAUDE.md invariant 11). These 13
+# objects are custom resources of a kind for which the wave-20 Application
+# installs a ValidatingWebhookConfiguration with failurePolicy: Fail. Applied
+# before that webhook's Service has endpoints, every one of them is rejected:
+#
+#   Internal error occurred: failed calling webhook
+#   "llminferenceserviceconfig.serving.kserve.io": no endpoints available
+#
+# This is the same reason the two charts cannot be a single Helm release. Under
+# Argo CD the wave is the fix, and it is a better one: a parent Application
+# waits for wave 20 to be *healthy*, i.e. for the controller Deployment to have
+# ready replicas, not merely applied.
+#
+# Without a parent Application to honour the wave, the retry policy below is
+# the backstop -- this Application fails, backs off and succeeds once the
+# controller is up. It converges either way; the wave just makes it converge
+# on the first attempt.
+#
+# Before applying: set repoURL, targetRevision and metadata.namespace.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kserve-runtime-configs
+  namespace: openshift-gitops          # `argocd` on upstream Argo CD
+  annotations:
+    argocd.argoproj.io/sync-wave: "30"
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/your-org/envoy-ai.git
+    targetRevision: main
+    path: charts/kserve-runtime-configs-openshift
+    helm:
+      releaseName: kserve-runtime-configs
+      skipCrds: true
+      valueFiles:
+        - values.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    # Same namespace as the controller. The chart's Chart.yaml version must
+    # stay equal to charts/kserve-llmisvc-openshift's -- the presets are
+    # rendered by the controller's own template engine, so a mismatch only
+    # shows up when a model is deployed.
+    namespace: kserve
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      # See the header: this is what makes the Application converge even when
+      # nothing orders it after wave 20.
+      limit: 10
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

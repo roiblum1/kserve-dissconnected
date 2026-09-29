@@ -872,6 +872,20 @@ work, in order of preference:
            image: docker.io/roi12345/vllm-llmd:0.30.0-r1
    ```
 
+   Override **every** role the presets you use put `llm-d-cuda` in, or those
+   pods pull the unmirrored upstream image and sit in `ImagePullBackOff`:
+
+   | Role in `spec` | Presets that set `llm-d-cuda` there |
+   |---|---|
+   | `template.containers[main]` | `template`, `decode-template`, `worker-data-parallel`, `decode-worker-data-parallel` |
+   | `worker.containers[main]` (multi-node) | `worker-data-parallel`, `decode-worker-data-parallel` |
+   | `prefill.template.containers[main]` (P/D) | `prefill-template`, `prefill-worker-data-parallel` |
+   | `prefill.worker.containers[main]` (P/D + multi-node) | `prefill-worker-data-parallel` |
+
+   (Preset names abbreviated from `kserve-config-llm-*`.) Regenerate the table
+   after a KServe bump with
+   `helm template x charts/kserve-llmisvc-openshift -n kserve | grep -B30 'llm-d-cuda'`.
+
 2. **Push the substitute under the tag the preset asks for**, i.e. as
    `<mirror>/llm-d/llm-d-cuda:v0.9.0`, and let the `ImageTagMirrorSet` do the
    rest. Cluster-wide and invisible in any manifest, so prefer option 1 unless

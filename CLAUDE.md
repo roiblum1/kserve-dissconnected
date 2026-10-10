@@ -4,8 +4,8 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-Four Helm wrapper charts installing Envoy Gateway v1.9.1, Envoy AI Gateway
-v1.1.0, LeaderWorkerSet v0.10.0 and KServe LLMInferenceService v0.21.0 on
+Four Helm wrapper charts installing Envoy Gateway v1.9.2, Envoy AI Gateway
+v1.2.0, LeaderWorkerSet v0.10.0 and KServe LLMInferenceService v0.21.0 on
 OpenShift, plus an `oc mirror` config for disconnected installs.
 
 **Argo CD is the deployment target: one Application per chart directory**,
@@ -20,9 +20,9 @@ narrative version of the same thing; keep the two consistent.
 [`UPGRADE.md`](UPGRADE.md) is the authoritative version-bump runbook.
 
 ```
-charts/envoy-gateway-openshift/          wraps oci://docker.io/envoyproxy/gateway-helm v1.9.1
+charts/envoy-gateway-openshift/          wraps oci://docker.io/envoyproxy/gateway-helm v1.9.2
   crds/                                  GENERATED: gateway.envoyproxy.io + InferencePool (x2)
-charts/envoy-ai-gateway-openshift/       wraps oci://docker.io/envoyproxy/ai-gateway-helm v1.1.0
+charts/envoy-ai-gateway-openshift/       wraps oci://docker.io/envoyproxy/ai-gateway-helm v1.2.0
   crds/                                  GENERATED: aigateway.envoyproxy.io
 charts/lws-openshift/                    wraps oci://registry.k8s.io/lws/charts/lws v0.10.0
                                          (CRDs: upstream subchart's own crds/)
@@ -204,7 +204,7 @@ use. Check `oc get inferencepool -A` before touching it.
     not "fix" it. The llmisvc controller is the opposite: it asks for UID 1000,
     so it does need `nonroot-v2`.
 
-14. **Envoy Gateway stays at v1.9.1, not KServe's pinned v1.8.1.** v1.8.1
+14. **Envoy Gateway stays at v1.9.2, not KServe's pinned v1.8.1.** v1.8.1
     registers the `ListenerSet` watch unconditionally in `watchResources()`
     and refuses to start when the CRD is absent. Proven with a clean-room
     install of the upstream chart in a fresh namespace — it is a startup-time
@@ -242,7 +242,33 @@ use. Check `oc get inferencepool -A` before touching it.
     Across Applications (the user's to set): envoy-gateway → envoy-ai-gateway
     and lws → kserve-llmisvc.
 
+17. **The AI Gateway render must stay deterministic: keep
+    `ai-gateway.controller.mcp.sessionEncryption.seed` set.** From v1.2.0
+    upstream generates a random MCP seed in the template and finds its
+    earlier one with `lookup`, which returns nothing in Argo CD's
+    repo-server. Empty seed = a new Secret on every render = permanently
+    OutOfSync. The fixed value is public and fine only while there is no
+    `MCPRoute`; with one, use `existingSecret`. Same class of problem as
+    `certManager.enable` in invariant 12.
+
+18. **Keep the `ClientTrafficPolicy` (`gateway.clientTrafficPolicy`).**
+    Without `connection.bufferLimit` Envoy Gateway buffers 32 KiB and the
+    gateway answers 413 to any larger prompt. Measured: 29 KB passes, 35 KB
+    is refused. A policy on a single listener replaces it there, so such a
+    policy needs the same `connection` and `http2` settings.
+
+19. **Envoy AI Gateway is v1.2.0, not KServe v0.21.0's pinned v1.1.0.**
+    Chosen, not forced. The InferencePool CRDs stay KServe's (v1.5.0)
+    although v1.2.0 is built against v1.6. Drop the exception when KServe
+    pins v1.2.0 or later. Patches that are not upstream yet live in
+    `patches/`, never in a forked chart.
+
 ## Version-bump procedure
+
+**The last bump is written up in [`UPGRADE-v1.2.0.md`](UPGRADE-v1.2.0.md):** Envoy
+Gateway v1.9.2 and Envoy AI Gateway v1.2.0, with what to mirror, the commands,
+what went wrong and what was tested. Read it before repeating that upgrade on
+another cluster, and write the next bump up the same way.
 
 **Follow [`UPGRADE.md`](UPGRADE.md).** It is the authoritative runbook: every
 command, the order, the rollback path, and a checklist. Do not improvise a
@@ -403,7 +429,7 @@ wave 10 do under Argo CD.
   `EnvoyProxy.spec.provider.kubernetes.envoyService.name`. Everything else
   Envoy Gateway generates keeps a hashed name.
 * Gateway API on the verified cluster is **v1.4.1 standard**, while Envoy
-  Gateway v1.9.1 builds against v1.6.1. Measured gap: `GatewayClass`,
+  Gateway v1.9.2 builds against v1.6.1. Measured gap: `GatewayClass`,
   `GRPCRoute` and `BackendTLSPolicy` are field-identical; `Gateway` is missing
   only ListenerSet and v1.6 `spec.tls` fields; `HTTPRoute` is missing only the
   native `cors` filter, which the v1.4.1 `type` enum **rejects at admission**
@@ -453,7 +479,7 @@ wave 10 do under Argo CD.
   `-rc1` OCI artifacts are byte-identical to the release's (verified by
   diffing both extracted trees). `v0.21.0-rc1` is the correct pin. Re-check on
   the next bump in case upstream starts publishing a final tag.
-* **KServe pins Envoy Gateway v1.8.1**, this repo runs v1.9.1 — forced, not
+* **KServe pins Envoy Gateway v1.8.1**, this repo runs v1.9.2 — forced, not
   preference. See invariant 14 for the crash log and the source diff.
   `llmisvc-dependency-install.sh` in the KServe release is the authoritative
   list of what KServe expects; re-derive it on every bump.
@@ -478,7 +504,7 @@ wave 10 do under Argo CD.
   `kserve`: `HTTPRoute`, `InferencePool`, the vLLM Deployment and the endpoint
   picker all land next to the `LLMInferenceService`.
 * `LLMInferenceService` can report `InferencePoolReady=False / WaitingForGateway`
-  while routing works perfectly. Envoy Gateway v1.9.1 accepts the
+  while routing works perfectly. Envoy Gateway v1.9.2 accepts the
   `InferencePool` into its resource tree but does not write `status.parents`
   back, which is what KServe waits on. Verify the data path instead of the
   condition.

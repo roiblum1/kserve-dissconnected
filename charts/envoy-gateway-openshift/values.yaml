@@ -14,7 +14,7 @@
 #
 # Everything under `openshift:` is added by this wrapper chart.
 # Everything under `envoy-gateway:` is passed straight through to the upstream
-# `gateway-helm` v1.9.1 subchart, so any key from
+# `gateway-helm` v1.9.2 subchart, so any key from
 # https://gateway.envoyproxy.io/docs/install/gateway-helm-api/ is valid there.
 # ---------------------------------------------------------------------------
 
@@ -82,7 +82,7 @@ envoy-gateway:
   # `crds.enabled: false` is a subchart CONDITION, so Helm skips the whole
   # subchart -- both its crds/ directory and its templates/. That is why one
   # value is enough here, and it is also why this chart requires Envoy Gateway
-  # v1.9.1: gateway-helm v1.8.1, which KServe v0.21.0 pins, has no `crds` key
+  # v1.9.1 or later: gateway-helm v1.8.1, which KServe v0.21.0 pins, has no `crds` key
   # and no condition on that dependency, so nothing can turn it off. See
   # README, "Why Envoy Gateway is v1.9.1 and not KServe's v1.8.1".
   #
@@ -99,7 +99,7 @@ envoy-gateway:
   # NOTE: the control-plane image is deliberately NOT pinned here. Upstream's
   # `eg.image` helper already defaults to
   # `docker.io/envoyproxy/gateway:{{ .Chart.Version }}`, which resolves to the
-  # subchart version (v1.9.1) and renders the identical full reference. Setting
+  # subchart version (v1.9.2) and renders the identical full reference. Setting
   # deployment.envoyGateway.image.{repository,tag} produced byte-identical
   # output, so it was removed to keep the delta minimal.
   deployment:
@@ -129,7 +129,7 @@ envoy-gateway:
             # that would be pulled into every Envoy data-plane pod and cannot be
             # mirrored reproducibly. The release image carries the same
             # shutdown-manager subcommand, so pin it here.
-            image: docker.io/envoyproxy/gateway:v1.9.1
+            image: docker.io/envoyproxy/gateway:v1.9.2
 
       extensionApis:
         # Required by Envoy AI Gateway: it routes to AI providers via Backend.

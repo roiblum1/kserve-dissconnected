@@ -29,7 +29,7 @@ envoy-gateway:
     envoyGateway:
       image:
         repository: REGISTRY.EXAMPLE.COM/envoyproxy/gateway
-        tag: v1.9.1
+        tag: v1.9.2
 
   config:
     envoyGateway:
@@ -37,4 +37,4 @@ envoy-gateway:
         kubernetes:
           shutdownManager:
             # Full reference: NOT rewritten by imageRegistry.
-            image: REGISTRY.EXAMPLE.COM/envoyproxy/gateway:v1.9.1
+            image: REGISTRY.EXAMPLE.COM/envoyproxy/gateway:v1.9.2

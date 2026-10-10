@@ -15,7 +15,7 @@
 #
 # `openshift:`, `argocd:` and `gateway:` are added by this wrapper chart.
 # `ai-gateway:` is passed straight through to the upstream `ai-gateway-helm`
-# v1.1.0 subchart.
+# v1.2.0 subchart.
 # ---------------------------------------------------------------------------
 
 openshift:
@@ -77,6 +77,10 @@ argocd:
     # it. See README, "Deploying with Argo CD".
     gateway: "2"
 
+    # With the Gateway it targets. A policy whose target does not exist yet is
+    # only reported as not accepted, so this is for legibility.
+    clientTrafficPolicy: "2"
+
     # Last: it targets the Service Envoy Gateway creates in response to the
     # Gateway. Creating it earlier is harmless -- an OpenShift Route may point
     # at a Service that does not exist yet, it just answers 503 -- so this is
@@ -129,6 +133,28 @@ gateway:
         #         matchLabels:
         #           kserve.io/inference: "true"
         from: All
+
+  # How much of a request Envoy may buffer on a client connection.
+  #
+  # ADDED by this wrapper, and needed for real prompts. Envoy Gateway's default
+  # is 32 KiB, and the AI Gateway has to buffer the whole request body to read
+  # the model name from it. Measured on this stack: a chat request of 35 KB got
+  # `413 Payload Too Large`, one of 29 KB passed. An agent's request with a
+  # long conversation is often several hundred KB.
+  #
+  # The values are upstream's own, from its "basic usage" example: 50Mi for
+  # the buffer, and the two HTTP/2 windows at Envoy's defaults, which Envoy
+  # Gateway otherwise lowers and which cap a request body the same way.
+  # The policy targets the whole Gateway. A listener that needs its own
+  # ClientTrafficPolicy (client certificates on a peer listener, say) must
+  # carry these settings too: a policy on a listener replaces this one there.
+  clientTrafficPolicy:
+    create: true
+    name: client-buffer-limit
+    bufferLimit: 50Mi
+    http2:
+      initialStreamWindowSize: 16Mi
+      initialConnectionWindowSize: 24Mi
 
   # EnvoyProxy tunes the data plane that Envoy Gateway generates for this
   # Gateway.
@@ -202,9 +228,9 @@ gateway:
 # ---------------------------------------------------------------------------
 # Upstream ai-gateway-helm values
 #
-# This chart overrides ONE upstream value (controller.mutatingWebhook.
-# certManager.enable) and ADDS one: controller.mutatingWebhook.
-# namespaceSelector. Everything else below is
+# This chart overrides TWO upstream values (controller.mutatingWebhook.
+# certManager.enable and controller.mcp.sessionEncryption.seed) and ADDS one:
+# controller.mutatingWebhook.namespaceSelector. Everything else below is
 # upstream's own default, repeated only so the knobs you are most likely to
 # reach for are visible without extracting the subchart -- deleting any of them
 # changes nothing.
@@ -218,7 +244,7 @@ ai-gateway:
   controller:
     image:
       repository: docker.io/envoyproxy/ai-gateway-controller
-      tag: ""          # "" -> chart appVersion -> v1.1.0
+      tag: ""          # "" -> chart appVersion -> v1.2.0
     replicaCount: 1
     logLevel: info
 
@@ -271,10 +297,30 @@ ai-gateway:
         issuerName: self-signed-issuer-for-mutating-webhook
         certificateName: self-signed-cert-for-mutating-webhook
 
+    mcp:
+      sessionEncryption:
+        # OVERRIDE (upstream since v1.2.0: "", a random seed per install).
+        # REQUIRED under Argo CD, for the same reason as certManager above.
+        #
+        # With an empty seed upstream `lookup`s the Secret it made earlier and
+        # generates 64 random characters when there is none. Argo CD renders
+        # without a cluster, so `lookup` finds nothing on EVERY render.
+        # Measured: two consecutive renders of v1.2.0 differ in exactly this
+        # Secret. That is an Application that is permanently OutOfSync, and a
+        # seed that changes on every sync.
+        #
+        # This is the value every release up to v1.1.0 used, so an upgrade
+        # changes nothing. It is public, so it protects nothing: it is safe
+        # here only because this stack serves no MCPRoute. BEFORE creating an
+        # MCPRoute, create a Secret with a random `seed` key in this namespace
+        # and name it in `existingSecret`, which makes upstream skip its own.
+        seed: default-insecure-seed
+        existingSecret: ""
+
   extProc:
     image:
       repository: docker.io/envoyproxy/ai-gateway-extproc
-      tag: ""          # "" -> chart appVersion -> v1.1.0
+      tag: ""          # "" -> chart appVersion -> v1.2.0
     logLevel: info
 
   # Upstream default. Must match where Envoy Gateway actually runs;

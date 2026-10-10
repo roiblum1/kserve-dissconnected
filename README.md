@@ -1,7 +1,7 @@
 # Envoy AI Gateway + KServe LLMInferenceService on OpenShift
 
-Four Helm charts that install [Envoy Gateway](https://gateway.envoyproxy.io/) v1.9.1,
-[Envoy AI Gateway](https://aigateway.envoyproxy.io/) v1.1.0,
+Four Helm charts that install [Envoy Gateway](https://gateway.envoyproxy.io/) v1.9.2,
+[Envoy AI Gateway](https://aigateway.envoyproxy.io/) v1.2.0,
 [LeaderWorkerSet](https://lws.sigs.k8s.io/) v0.10.0 and
 [KServe](https://kserve.github.io/website/) LLMInferenceService v0.21.0 on
 OpenShift, packaged so they are safe to run on a **shared** cluster and
@@ -41,16 +41,18 @@ Verified end-to-end on OpenShift 4.22.13 / Kubernetes v1.35.6.
 | `mirror-config.yaml` | `oc mirror` v2 `ImageSetConfiguration` for the whole stack |
 | [`PATCHES.md`](PATCHES.md) | Audit report: every change from upstream, and why |
 | [`UPGRADE.md`](UPGRADE.md) | Version-bump runbook and checklist |
+| [`UPGRADE-v1.2.0.md`](UPGRADE-v1.2.0.md) | The upgrade to Envoy Gateway v1.9.2 and AI Gateway v1.2.0 as it was done: what to mirror, the commands, what went wrong, what was measured, and the two patches |
+| `patches/agent-router-v1.2.0/` | Two fixes that are not in AI Gateway v1.2.0: quotas on multi-site routes, and cached tokens on the Anthropic path |
 | [`CLAUDE.md`](CLAUDE.md) | Working notes and invariants for this repo |
 
 Every chart is a thin wrapper around upstream charts, pulled as Helm
 dependencies and vendored **byte-identical** — no upstream template is ever
-forked. The combined delta is **8 value overrides across four charts**, plus
+forked. The combined delta is **9 value overrides across four charts**, plus
 three SCC RoleBindings, the Gateway wiring, sync waves, and CRDs shipped as
 generated, annotated copies of upstream's. Of
 upstream's 107 `gateway-helm` settings this repo overrides **two**, `lws` is
-overridden **not at all**, `ai-gateway-helm` **once** (cert-manager for its
-webhook, required under Argo CD), and 16 of the 17 shared Envoy
+overridden **not at all**, `ai-gateway-helm` **twice** (cert-manager for its
+webhook and a fixed MCP session seed, both required under Argo CD), and 16 of the 17 shared Envoy
 Gateway objects render identical to upstream. See
 [how far this is from upstream](#how-far-this-is-from-upstream-measured) and
 [every change, and why](#every-change-and-why).
@@ -230,15 +232,15 @@ updates need an explicit `hack/install-crds.sh` on every version bump. **Argo CD
 has no such gap**: `crds/` is part of the rendered manifests and is applied on
 every sync like anything else.
 
-Envoy Gateway v1.9.1 compiles against Gateway API v1.6.1 but probes for each
+Envoy Gateway v1.9.2 compiles against Gateway API v1.6.1 but probes for each
 optional CRD at startup (`tcpRouteCRDExists`, `tlsRouteCRDExists`,
 `udpRouteCRDExists`, `listenerSetCRDExists`, …) and disables the watches it
 cannot satisfy, so running against the cluster's standard-channel v1.4.1 works.
 `TCPRoute`, `TLSRoute`, `UDPRoute` and `XListenerSet` are simply unavailable —
 `Gateway`, `HTTPRoute`, `GRPCRoute`, `ReferenceGrant` and `BackendTLSPolicy` all
-are. **That probe is why this chart is pinned to v1.9.1 and not to KServe's
+are. **That probe is why this chart is pinned to v1.9.2 and not to KServe's
 v1.8.1** — see
-[Why Envoy Gateway is v1.9.1 and not KServe's v1.8.1](#why-envoy-gateway-is-v191-and-not-kserves-v181).
+[Why Envoy Gateway is v1.9.2 and not KServe's v1.8.1](#why-envoy-gateway-is-v192-and-not-kserves-v181).
 
 ### 4. Exposing the gateway: LoadBalancer or Route
 
@@ -888,8 +890,8 @@ committed under `charts/*/charts/`, and the three CRD-source charts under
 `hack/charts/`:
 
 ```
-hack/charts/gateway-crds-helm-v1.9.1.tgz
-hack/charts/ai-gateway-crds-helm-v1.1.0.tgz
+hack/charts/gateway-crds-helm-v1.9.2.tgz
+hack/charts/ai-gateway-crds-helm-v1.2.0.tgz
 hack/charts/kserve-llmisvc-crd-v0.21.0-rc1.tgz
 ```
 
@@ -970,7 +972,7 @@ fetch runs in the `storage-initializer` init container, using
 
 ## Gateway API version compatibility
 
-Envoy Gateway v1.9.1 builds against **Gateway API v1.6.1**; this cluster serves
+Envoy Gateway v1.9.2 builds against **Gateway API v1.6.1**; this cluster serves
 **v1.4.1, standard channel**, owned by the ingress-operator. That gap is real but
 bounded, and it was measured rather than assumed.
 
@@ -979,7 +981,7 @@ Gateway v1.8.1 builds against v1.5.1, a nominally smaller gap, and the measured
 field diff below is **identical** for both — every v1.6-only addition is in a
 kind or field that was already unusable. v1.8.1 is nonetheless unusable here for
 a different reason entirely; see
-[Why Envoy Gateway is v1.9.1 and not KServe's v1.8.1](#why-envoy-gateway-is-v191-and-not-kserves-v181).
+[Why Envoy Gateway is v1.9.2 and not KServe's v1.8.1](#why-envoy-gateway-is-v192-and-not-kserves-v181).
 
 **The wire contract is identical.** Every kind Envoy Gateway uses stores at
 `v1` on both sides:
@@ -1021,7 +1023,7 @@ experimental-channel kinds, none used by AI Gateway.
 Reproduce it against the vendored CRD chart:
 
 ```bash
-helm template x hack/charts/gateway-crds-helm-v1.9.1.tgz \
+helm template x hack/charts/gateway-crds-helm-v1.9.2.tgz \
   --set crds.gatewayAPI.enabled=true --set crds.gatewayAPI.channel=standard \
   --set crds.envoyGateway.enabled=false
 # then diff each kind's openAPIV3Schema property paths against
@@ -1038,7 +1040,7 @@ RequestRedirect        URLRewrite              ExtensionRef
 
 with no `CORS` member, so an HTTPRoute using it is **rejected at admission with
 a clear enum error** rather than silently pruned. Envoy Gateway's own
-`SecurityPolicy` (`gateway.envoyproxy.io`, installed at v1.9.1) provides CORS
+`SecurityPolicy` (`gateway.envoyproxy.io`, installed at v1.9.2) provides CORS
 with the identical field set — `allowOrigins`, `allowMethods`, `allowHeaders`,
 `exposeHeaders`, `allowCredentials`, `maxAge` — so there is no capability loss,
 just a different CRD.
@@ -1051,7 +1053,7 @@ errors, zero restarts — which is what a pruning fight would not look like.
 Reproduce the diff yourself:
 
 ```bash
-helm pull oci://docker.io/envoyproxy/gateway-crds-helm --version v1.9.1 --untar
+helm pull oci://docker.io/envoyproxy/gateway-crds-helm --version v1.9.2 --untar
 # compare gateway-crds-helm/templates/standard-gatewayapi-crds.yaml
 # against: oc get crd <kind>.gateway.networking.k8s.io -o json
 ```
@@ -1088,7 +1090,7 @@ dot-accessed in a Go template, which is why the wrapper templates use
 | `envoy-gateway.crds.enabled` | `false` | **Leave false.** See section 3 |
 | `envoy-gateway.config.envoyGateway.extensionManager` | set | Remove to run without AI Gateway |
 | `envoy-gateway.config.envoyGateway.extensionManager.backendResources` | `InferencePool` | **Required with KServe** — without it every model route is a 500. See section 7 |
-| `envoy-gateway.config.envoyGateway.provider.kubernetes.shutdownManager.image` | `gateway:v1.9.1` | Pins away from `gateway-dev:latest` |
+| `envoy-gateway.config.envoyGateway.provider.kubernetes.shutdownManager.image` | `gateway:v1.9.2` | Pins away from `gateway-dev:latest` |
 
 ### `charts/envoy-ai-gateway-openshift`
 
@@ -1170,7 +1172,7 @@ pure-upstream install would cost. Regenerate its machine-checkable half with
 No upstream template, helper or values file is edited, patched or
 post-rendered. All five subcharts are vendored byte-identical to a fresh
 `helm pull` (verified by sha256 — each digest appears exactly twice). The delta
-is **8 value overrides**, 14 added values, five added Kubernetes resource kinds,
+is **9 value overrides**, 14 added values, five added Kubernetes resource kinds,
 the presets re-rendered with a sync wave, and CRDs shipped as generated copies
 of upstream's with two Argo CD annotations added.
 
@@ -1237,10 +1239,10 @@ evidence:
 | Pin the AI Gateway image tags for mirroring | **Rejected as redundant** — upstream's defaults render the identical reference. Removed; `ai-gateway-helm`'s only override is the cert-manager one Argo CD forces |
 | Pin the Envoy Gateway control-plane image | **Rejected as redundant** — upstream's `eg.image` helper already defaults to `gateway:{{ .Chart.Version }}`. Removed earlier for the same reason |
 | Use `--skip-crds` instead of `crds.enabled=false` | **Rejected as insufficient** — it does not stop the admission policy in `templates/`, and it is a flag rather than a value (Argo CD's equivalent, `skipCrds`, would also drop this repo's own CRDs, which now live in `crds/`) |
-| Follow KServe's Envoy Gateway v1.8.1 pin | **Blocked** — v1.8.1 cannot start without the experimental `ListenerSet` CRD. See [the evidence](#why-envoy-gateway-is-v191-and-not-kserves-v181) |
+| Follow KServe's Envoy Gateway v1.8.1 pin | **Blocked** — v1.8.1 cannot start without the experimental `ListenerSet` CRD. See [the evidence](#why-envoy-gateway-is-v192-and-not-kserves-v181) |
 | Let KServe create its own `kserve-ingress-gateway` (upstream's default) and override nothing | **Possible, not chosen.** It means a second Envoy data plane, Service and Route. One value override points KServe at the Gateway that already exists; set `kserveGateway` back to `kserve/kserve-ingress-gateway` and create that Gateway if you prefer the separation |
 
-### The eight overrides, ranked by how load-bearing they are
+### The nine overrides, ranked by how load-bearing they are
 
 | # | Chart | Key | Consequence of *not* setting it |
 |---|---|---|---|
@@ -1272,7 +1274,7 @@ vendored byte-identical. Everything below is either a **value override**, an
 **added resource**, or **CRDs re-shipped** in a wrapper's `crds/`. Use this as
 the diff to re-apply when bumping versions.
 
-Totals: **8 value overrides** across four charts, one added subchart value,
+Totals: **9 value overrides** across four charts, one added subchart value,
 five added Kubernetes resource kinds (`RoleBinding`, `GatewayClass`, `Gateway`,
 `EnvoyProxy`, `Route`), the KServe presets re-rendered with a sync wave, and 21
 CRDs shipped as generated, annotated copies of upstream's. Every one is
@@ -1280,37 +1282,38 @@ itemised with its justification in [Every change, and why](#every-change-and-why
 
 | Chart | Upstream leaf values | Overridden |
 |---|---|---|
-| `gateway-helm` v1.9.1 | 107 | 2 |
-| `ai-gateway-helm` v1.1.0 | 76 | 1 (+1 added) |
+| `gateway-helm` v1.9.2 | 107 | 2 |
+| `ai-gateway-helm` v1.2.0 | 79 | 2 (+1 added) |
 | `lws` v0.10.0 | 24 | **0** |
 | `kserve-llmisvc-resources` v0.21.0-rc1 | 151 | 5 |
 | `kserve-runtime-configs` v0.21.0-rc1 | 158 | **0** |
 
-### Value overrides on `gateway-helm` v1.9.1
+### Value overrides on `gateway-helm` v1.9.2
 
 | Key | Upstream default | Ours | Why |
 |---|---|---|---|
 | `crds.enabled` | `true` | **`false`** | Upstream subchart ships Gateway API **v1.6.1 experimental** CRDs and a `safe-upgrades` ValidatingAdmissionPolicy that **denies** `bundle-version ^v1\.[0-4]`. OpenShift's ingress-operator owns v1.4.1 standard, so this would overwrite a cluster-wide, multi-tenant resource *and* start rejecting the operator's own reconcile writes. |
-| `config.envoyGateway.provider.kubernetes.shutdownManager.image` | *(unset →* `docker.io/envoyproxy/gateway-dev:latest`*)* | `docker.io/envoyproxy/gateway:v1.9.1` | Upstream's compiled-in default is a **mutable `:latest` dev tag** (`api/v1alpha1.DefaultShutdownManagerImage`). Unusable disconnected, unreproducible connected. |
+| `config.envoyGateway.provider.kubernetes.shutdownManager.image` | *(unset →* `docker.io/envoyproxy/gateway-dev:latest`*)* | `docker.io/envoyproxy/gateway:v1.9.2` | Upstream's compiled-in default is a **mutable `:latest` dev tag** (`api/v1alpha1.DefaultShutdownManagerImage`). Unusable disconnected, unreproducible connected. |
 | `global.images.envoyProxy.image` | `""` *(→ compiled-in default)* | pinned by digest | The data-plane image never appears in `helm template` output, so it is invisible to mirroring tooling. |
-| `deployment.envoyGateway.image.repository` / `.tag` | `""` *(falls back to chart version)* | explicit `gateway` / `v1.9.1` | Makes `helm template \| grep image:` a complete mirror list. |
+| `deployment.envoyGateway.image.repository` / `.tag` | `""` *(falls back to chart version)* | explicit `gateway` / `v1.9.2` | Makes `helm template \| grep image:` a complete mirror list. |
 | `config.envoyGateway.extensionApis.enableBackend` | `{}` | `true` | Required by AI Gateway — it routes to providers via `Backend`. |
 | `config.envoyGateway.extensionApis.enableEnvoyPatchPolicy` | `{}` | `true` | Recommended upstream for compatibility. |
 | `config.envoyGateway.extensionManager` | *(unset)* | xDS hook → `ai-gateway-controller...:1063` | AI Gateway registers as an xDS translation hook. Taken from upstream's `manifests/envoy-gateway-values.yaml`. |
 | `fullnameOverride` | *(unset)* | `envoy-gateway` | Needed because a Helm dependency **alias** becomes `.Chart.Name` inside the subchart, so `eg.fullname` would emit the alias in every resource name. See the alias note below. |
 
-### Value overrides on `ai-gateway-helm` v1.1.0
+### Value overrides on `ai-gateway-helm` v1.2.0
 
-**One override**, forced by Argo CD, and one value *added* where upstream has
-none:
+**Two overrides**, both forced by Argo CD, and one value *added* where upstream
+has none:
 
 | Key | Upstream default | Ours | Why |
 |---|---|---|---|
 | `controller.mutatingWebhook.certManager.enable` | `false` | **`true`** | Upstream mints the webhook cert inside the template, guarded by `lookup`. Argo CD renders with no cluster connection, so `lookup` is always nil and every render generates a new CA and key: a permanently OutOfSync Application that rotates the keypair on every self-heal. cert-manager (already required for KServe) makes the render deterministic. |
+| `controller.mcp.sessionEncryption.seed` | `""` *(a random seed per install)* | `default-insecure-seed` | New in v1.2.0. With an empty seed upstream `lookup`s its own Secret and generates 64 random characters when there is none. Argo CD renders without a cluster, so every render differs in that Secret: a permanently OutOfSync Application and a seed that changes on every sync. The value is the one every release up to v1.1.0 used, so the upgrade changes nothing. It is public and safe only because this stack serves no `MCPRoute`; set `existingSecret` before creating one. |
 | `controller.mutatingWebhook.namespaceSelector` | *(absent)* | `kubernetes.io/metadata.name in [envoy-gateway-system]` | The `MutatingWebhookConfiguration` is cluster-scoped, matches **pod CREATE** and has `failurePolicy: Fail`. Upstream's `objectSelector` already narrows it to envoy-gateway-managed pods; adding a namespaceSelector bounds the blast radius on a shared cluster to the one namespace that has such pods. Remove it if you enable `gatewayNamespaceMode`. |
 
 Two overrides that used to be here were **removed after measuring them**:
-`controller.image.tag` and `extProc.image.tag` were pinned to `v1.1.0` for
+`controller.image.tag` and `extProc.image.tag` were pinned to `v1.2.0` for
 mirroring, but upstream's `repository` already defaults to
 `docker.io/envoyproxy/ai-gateway-{controller,extproc}` and `tag: ""` resolves
 to the chart `appVersion`, so the render was byte-identical either way.
@@ -1319,8 +1322,8 @@ to the chart `appVersion`, so the render was byte-identical either way.
 $ helm template x charts/envoy-ai-gateway-openshift -n envoy-ai-gateway-system \
     --set ai-gateway.controller.image.tag=null --set ai-gateway.extProc.image.tag=null \
     | grep -oE '(image: |--extProcImage=)\S+' | sort -u
---extProcImage=docker.io/envoyproxy/ai-gateway-extproc:v1.1.0
-image: "docker.io/envoyproxy/ai-gateway-controller:v1.1.0"
+--extProcImage=docker.io/envoyproxy/ai-gateway-extproc:v1.2.0
+image: "docker.io/envoyproxy/ai-gateway-controller:v1.2.0"
 ```
 
 ### Value overrides on `lws` v0.10.0
@@ -1387,7 +1390,7 @@ Everything else is upstream's text; `--check` fails on drift.
 Both upstream charts are vendored **byte-identical** (verified by sha256 against
 a fresh `helm pull`); nothing is forked.
 
-| `gateway-helm` v1.9.1 | |
+| `gateway-helm` v1.9.2 | |
 |---|---|
 | Upstream leaf values | 107 — we override **2**, set 11 absent ones, keep **98%** |
 | The 2 overrides | `crds.enabled` → `false`, and `global.images.envoyProxy.image` |
@@ -1608,7 +1611,7 @@ model is in another namespace. The chart default is `All`; look for an
 overriding value file or Application parameter.
 
 **`LLMInferenceService` stuck with `InferencePoolReady=False / WaitingForGateway`.**
-Observed on this stack even when routing is fully working: Envoy Gateway v1.9.1
+Observed on this stack even when routing is fully working: Envoy Gateway v1.9.2
 accepts the `InferencePool` into its resource tree (`added custom backend
 resource`) but does not write a `status.parents` entry back, which is what
 KServe waits for. Check the wiring directly instead of trusting the condition —
@@ -1704,9 +1707,9 @@ by anything in this repository.
 
 | Component | Version | Source of truth |
 |---|---|---|
-| Envoy Gateway | v1.9.1 | `charts/envoy-gateway-openshift/Chart.yaml` — **not** KServe's v1.8.1, [and why](#why-envoy-gateway-is-v191-and-not-kserves-v181) |
-| Envoy AI Gateway | v1.1.0 | `charts/envoy-ai-gateway-openshift/Chart.yaml` |
-| Envoy (data plane) | distroless-v1.39.1 | `api/v1alpha1.DefaultEnvoyProxyImage` in Envoy Gateway v1.9.1 |
+| Envoy Gateway | v1.9.2 | `charts/envoy-gateway-openshift/Chart.yaml` — **not** KServe's v1.8.1, [and why](#why-envoy-gateway-is-v192-and-not-kserves-v181) |
+| Envoy AI Gateway | v1.2.0 | `charts/envoy-ai-gateway-openshift/Chart.yaml` |
+| Envoy (data plane) | distroless-v1.39.1 | `api/v1alpha1.DefaultEnvoyProxyImage` in Envoy Gateway v1.9.2 |
 | LeaderWorkerSet | v0.10.0 | `charts/lws-openshift/Chart.yaml`; pinned by KServe's `LWS_VERSION` |
 | KServe LLMInferenceService | v0.21.0 (charts labelled `v0.21.0-rc1`) | `charts/kserve-llmisvc-openshift/Chart.yaml` |
 | vLLM / llm-d presets | llm-d v0.9.0 / router v0.10.0 / vllm-openai-cpu v0.23.0 | Hardcoded in `kserve-runtime-configs` |
@@ -1714,7 +1717,7 @@ by anything in this repository.
 | cert-manager | v1.20.3 (Operator v1.20.0) | Pre-existing on the cluster; a prerequisite, not installed here |
 | Verified on | OCP 4.22.13 / k8s v1.35.6 | |
 
-### Why Envoy Gateway is v1.9.1 and not KServe's v1.8.1
+### Why Envoy Gateway is v1.9.2 and not KServe's v1.8.1
 
 This is the one component where KServe's pin is not followed, and it is a hard
 technical blocker, not a preference.
@@ -1760,7 +1763,7 @@ So this is a startup-time API discovery failure in the controller binary. The
 full probe lists:
 
 ```bash
-for v in v1.8.1 v1.9.1; do
+for v in v1.8.1 v1.9.2; do
   curl -fsSL "https://raw.githubusercontent.com/envoyproxy/gateway/$v/internal/provider/kubernetes/controller.go" \
     | sed -n '/^type gatewayAPIReconciler struct/,/^}/p' | grep -oE '[a-zA-Z]+CRDExists' | sort | tr '\n' ' '
   echo "   <- $v"
@@ -1774,7 +1777,7 @@ hrfCRDExists serviceImportCRDExists spCRDExists tcpRouteCRDExists udpRouteCRDExi
 backendCRDExists btlsCRDExists btpCRDExists ctpCRDExists eepCRDExists epCRDExists
 eppCRDExists extBackendCRDExists grpcRouteCRDExists hrfCRDExists listenerSetCRDExists
 serviceImportCRDExists spCRDExists tcpRouteCRDExists tlsRouteCRDExists udpRouteCRDExists
-   <- v1.9.1
+   <- v1.9.2
 ```
 
 v1.9.1 added `listenerSetCRDExists` (along with `btlsCRDExists` and
@@ -1786,15 +1789,15 @@ are:
 |---|---|
 | Install experimental-channel Gateway API cluster-wide | **No.** Overwrites the ingress-operator's standard-channel CRDs for every tenant — the exact hazard section 3 exists to prevent |
 | Install only `listenersets.gateway.networking.k8s.io` from the experimental channel | Additive rather than destructive, so *possible*, but it adds an experimental kind to an API group the ingress-operator owns and continuously reconciles. Not taken here without asking; it is your call, not a default |
-| Run Envoy Gateway v1.9.1 | **Taken.** Needs no cluster-scoped change at all |
+| Run Envoy Gateway v1.9.2 | **Taken.** Needs no cluster-scoped change at all |
 
-Compatibility of v1.9.1 with everything KServe needs was checked rather than
+Compatibility of v1.9.2 with everything KServe needs was checked rather than
 assumed:
 
 * `ExtensionManager.BackendResources` — the field
-  `values.yaml` sets — exists in **both** v1.8.1 and v1.9.1
+  `values.yaml` sets — exists in **both** v1.8.1 and v1.9.2
   (`api/v1alpha1/envoygateway_types.go`).
-* Envoy AI Gateway v1.1.0, which KServe pins, runs against v1.9.1: the Gateway
+* Envoy AI Gateway v1.2.0 runs against v1.9.2, the version it is built with: the Gateway
   reaches `PROGRAMMED=True` and the `InferencePool` ext_proc cluster appears in
   the Envoy config dump. Proven in
   [Proving the KServe data path](#proving-the-kserve-data-path).
@@ -1821,13 +1824,13 @@ KServe v0.21.0 also pins its own dependency versions, in
 
 | KServe v0.21.0 pins | This repo | Status |
 |---|---|---|
-| `ENVOY_AI_GATEWAY_VERSION=v1.1.0` | v1.1.0 | **follows** |
+| `ENVOY_AI_GATEWAY_VERSION=v1.1.0` | **v1.2.0** | **deviates, chosen** — for its token accounting fixes on streams. No CRD storage migration. Run here against KServe v0.21.0 and the v1.5.0 InferencePool CRDs. See [`UPGRADE-v1.2.0.md`](UPGRADE-v1.2.0.md) |
 | `LWS_VERSION=v0.10.0` | v0.10.0 | **follows** — not the newest LWS (v0.11.0 exists) |
 | `KSERVE_VERSION=v0.21.0` | v0.21.0-rc1 charts | **follows** (see label note above) |
 | `GIE_VERSION=v1.5.0`, `LLMD_ROUTER_VERSION=v0.10.0` | rendered from the `kserve-llmisvc-resources` chart | **follows**, and more tightly: the CRDs come from the controller's own chart, so they cannot drift from it. One version to track instead of three |
 | `CERT_MANAGER_VERSION=v1.17.0` via Helm | Operator v1.20.0, pre-existing | **deviates** — the cluster already had it, operator-managed. cert-manager is a prerequisite here, not something these charts install |
 | `GATEWAY_API_VERSION=v1.5.1` | v1.4.1 standard | **deviates, forced** — owned by `cluster-ingress-operator`. See [Gateway API version compatibility](#gateway-api-version-compatibility) |
-| `ENVOY_GATEWAY_VERSION=v1.8.1` | **v1.9.1** | **deviates, forced** — v1.8.1 crash-loops on standard-channel Gateway API. See [the evidence](#why-envoy-gateway-is-v191-and-not-kserves-v181) |
+| `ENVOY_GATEWAY_VERSION=v1.8.1` | **v1.9.2** | **deviates, forced** — v1.8.1 crash-loops on standard-channel Gateway API. See [the evidence](#why-envoy-gateway-is-v192-and-not-kserves-v181) |
 
 Re-derive the matrix on every KServe bump — this is the authoritative source,
 not the docs site:

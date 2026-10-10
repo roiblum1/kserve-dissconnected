@@ -71,7 +71,7 @@ if ! kubectl get crd gateways.gateway.networking.k8s.io >/dev/null 2>&1; then
    On OpenShift, enable the platform's own Gateway API support instead. On a
    cluster you own exclusively, install them from the upstream chart:
 
-     helm template eg-crds hack/charts/gateway-crds-helm-v1.9.1.tgz \
+     helm template eg-crds hack/charts/gateway-crds-helm-v1.9.2.tgz \
        --set crds.gatewayAPI.enabled=true \
        --set crds.gatewayAPI.channel=standard \
        --set crds.envoyGateway.enabled=false | kubectl apply --server-side -f -

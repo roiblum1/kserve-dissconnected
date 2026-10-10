@@ -1,0 +1,308 @@
+From 39db029ad21a0cb98f12da5dfdf617ed11fc1885 Mon Sep 17 00:00:00 2001
+From: Roi Blum <roiblum05@gmail.com>
+Date: Sat, 10 Oct 2026 00:03:05 +0300
+Subject: [PATCH 1/2] extensionserver: apply QuotaPolicy to per-backend
+ clusters
+
+**Description**
+
+A QuotaPolicy is silently not enforced on an AIGatewayRoute whenever Envoy
+Gateway builds one cluster per backend for the generated HTTPRoute. It does
+so, for example, when a BackendTrafficPolicy with zone-aware load balancing
+(`loadBalancer.zoneAware.weightedZones` or `preferLocal`) targets the
+route, and also for destinations with mixed endpoint types or per-backend
+filters. The cluster is then named
+`httproute/{namespace}/{routeName}/rule/{ruleIndex}/backend/{backendRefIndex}`
+and the route points at these clusters.
+
+`resolveClusterRule` only accepted the five-part route-level name. For a
+per-backend cluster it returned nil, so `routeHasQuotaBackend` was false
+and the route was never patched with the rate limit descriptors: requests
+over the quota were answered, nothing was counted, and nothing was logged.
+
+`parseAIGatewayClusterName` already parses both forms. It was added in
+#2348 for the cluster modification in `post_translate_modify.go`; the
+quota path from #1869 was not updated then. This change makes
+`resolveClusterRule` use it too. For a per-backend cluster the returned
+rule holds only the backendRef that cluster belongs to. The route-level
+helpers go over all clusters of a route, so a route gets the same set of
+policies and model name overrides as with the route-level cluster.
+
+The tests cover the name parsing through `backendKeysForCluster` and
+`clusterHasQuotaBackend`, and the route level, which is where it failed:
+`routeHasQuotaBackend` and `patchRoutesWithQuotaRateLimits` with a route
+that points at per-backend clusters. These fail without the change.
+
+Seen with Envoy Gateway v1.9.1 and Envoy AI Gateway v1.1.0: a tenant
+limited to 30 tokens per hour got 10 of 10 requests answered and no
+counter was written to Redis. With `weightedZones` removed from the
+BackendTrafficPolicy and nothing else changed, the same tenant got 5
+answers and then 429.
+
+Known limitation, not changed here: the backend index is taken as the
+index of the backendRef in the AIGatewayRoute rule, as
+`maybeModifyCluster` does. When the controller drops a backendRef that
+fails validation from the generated HTTPRoute, the indexes after it shift
+and no longer line up. That only happens while the AIGatewayRoute is not
+accepted.
+
+Signed-off-by: Roi Blum <roiblum05@gmail.com>
+---
+ internal/extensionserver/quota_ratelimit.go   |  38 ++---
+ .../extensionserver/quota_ratelimit_test.go   | 135 ++++++++++++++++++
+ 2 files changed, 157 insertions(+), 16 deletions(-)
+
+diff --git a/internal/extensionserver/quota_ratelimit.go b/internal/extensionserver/quota_ratelimit.go
+index 6755bc88..78cbdcc7 100644
+--- a/internal/extensionserver/quota_ratelimit.go
++++ b/internal/extensionserver/quota_ratelimit.go
+@@ -9,8 +9,6 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"sort"
+-	"strconv"
+-	"strings"
+ 
+ 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
+ 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+@@ -350,34 +348,42 @@ type clusterRouteInfo struct {
+ }
+ 
+ // resolveClusterRule parses a cluster name and fetches the corresponding AIGatewayRoute rule.
+-// Cluster name format: "httproute/{namespace}/{routeName}/rule/{ruleIndex}"
++//
++// Envoy Gateway names the cluster of a rule "httproute/{namespace}/{routeName}/rule/{ruleIndex}".
++// When it creates one cluster per backend instead, for example because a BackendTrafficPolicy with
++// zone-aware weights targets the route, the name is
++// "httproute/{namespace}/{routeName}/rule/{ruleIndex}/backend/{backendRefIndex}". The returned rule
++// then holds only the backendRef that cluster belongs to.
+ func (s *Server) resolveClusterRule(ctx context.Context, clusterName string) *clusterRouteInfo {
+-	parts := strings.Split(clusterName, "/")
+-	if len(parts) != 5 || parts[0] != "httproute" {
+-		return nil
+-	}
+-	namespace := parts[1]
+-	routeName := parts[2]
+-	ruleIndex, err := strconv.Atoi(parts[4])
+-	if err != nil || ruleIndex < 0 {
++	name, err := parseAIGatewayClusterName(clusterName)
++	if err != nil {
+ 		return nil
+ 	}
+ 
+ 	var aigwRoute aigv1b1.AIGatewayRoute
+ 	if err := s.k8sClient.Get(ctx, client.ObjectKey{
+-		Namespace: namespace,
+-		Name:      routeName,
++		Namespace: name.namespace,
++		Name:      name.routeName,
+ 	}, &aigwRoute); err != nil {
+ 		return nil
+ 	}
+ 
+-	if ruleIndex >= len(aigwRoute.Spec.Rules) {
++	if name.ruleIndex >= len(aigwRoute.Spec.Rules) {
+ 		return nil
+ 	}
++	rule := &aigwRoute.Spec.Rules[name.ruleIndex]
++
++	if name.backendRefIndex != noBackendRefIndex {
++		if name.backendRefIndex >= len(rule.BackendRefs) {
++			return nil
++		}
++		rule = rule.DeepCopy()
++		rule.BackendRefs = rule.BackendRefs[name.backendRefIndex : name.backendRefIndex+1]
++	}
+ 
+ 	return &clusterRouteInfo{
+-		namespace: namespace,
+-		rule:      &aigwRoute.Spec.Rules[ruleIndex],
++		namespace: name.namespace,
++		rule:      rule,
+ 	}
+ }
+ 
+diff --git a/internal/extensionserver/quota_ratelimit_test.go b/internal/extensionserver/quota_ratelimit_test.go
+index f476b5f4..12b9e905 100644
+--- a/internal/extensionserver/quota_ratelimit_test.go
++++ b/internal/extensionserver/quota_ratelimit_test.go
+@@ -1755,6 +1755,30 @@ func TestBackendKeysForCluster(t *testing.T) {
+ 		require.Equal(t, []string{"default/backend-c"}, keys)
+ 	})
+ 
++	t.Run("per-backend cluster name returns that backend's key", func(t *testing.T) {
++		keys := s.backendKeysForCluster(context.Background(), "httproute/default/myroute/rule/0/backend/0")
++		require.Equal(t, []string{"default/backend-a"}, keys)
++		keys = s.backendKeysForCluster(context.Background(), "httproute/default/myroute/rule/0/backend/1")
++		require.Equal(t, []string{"default/backend-b"}, keys)
++		keys = s.backendKeysForCluster(context.Background(), "httproute/default/myroute/rule/1/backend/0")
++		require.Equal(t, []string{"default/backend-c"}, keys)
++	})
++
++	t.Run("per-backend cluster name with backend index out of bounds returns nil", func(t *testing.T) {
++		keys := s.backendKeysForCluster(context.Background(), "httproute/default/myroute/rule/1/backend/1")
++		require.Nil(t, keys)
++	})
++
++	t.Run("per-backend cluster name with non-numeric backend index returns nil", func(t *testing.T) {
++		keys := s.backendKeysForCluster(context.Background(), "httproute/default/myroute/rule/0/backend/abc")
++		require.Nil(t, keys)
++	})
++
++	t.Run("per-backend cluster name with a wrong segment returns nil", func(t *testing.T) {
++		keys := s.backendKeysForCluster(context.Background(), "httproute/default/myroute/rule/0/other/0")
++		require.Nil(t, keys)
++	})
++
+ 	t.Run("wrong number of parts returns nil", func(t *testing.T) {
+ 		keys := s.backendKeysForCluster(context.Background(), "too/few/parts")
+ 		require.Nil(t, keys)
+@@ -1806,6 +1830,16 @@ func TestClusterHasQuotaBackend(t *testing.T) {
+ 		require.True(t, result)
+ 	})
+ 
++	t.Run("per-backend cluster of the backend with a policy returns true", func(t *testing.T) {
++		result := s.clusterHasQuotaBackend(context.Background(), "httproute/default/myroute/rule/0/backend/0", quotaBackendPolicies)
++		require.True(t, result)
++	})
++
++	t.Run("per-backend cluster of a backend without a policy returns false", func(t *testing.T) {
++		result := s.clusterHasQuotaBackend(context.Background(), "httproute/default/myroute/rule/0/backend/1", quotaBackendPolicies)
++		require.False(t, result)
++	})
++
+ 	t.Run("cluster with no matching backend returns false", func(t *testing.T) {
+ 		noMatchPolicies := map[string][]aigv1a1.QuotaPolicy{
+ 			"default/backend-x": {{Spec: aigv1a1.QuotaPolicySpec{}}},
+@@ -1843,6 +1877,7 @@ func TestRouteHasQuotaBackend(t *testing.T) {
+ 				{
+ 					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+ 						{Name: "backend-a"},
++						{Name: "backend-b"},
+ 					},
+ 				},
+ 			},
+@@ -1910,6 +1945,52 @@ func TestRouteHasQuotaBackend(t *testing.T) {
+ 		require.True(t, result)
+ 	})
+ 
++	// Envoy Gateway creates one cluster per backend, for example when a BackendTrafficPolicy with
++	// zone-aware load balancing targets the route. The route then points at the per-backend clusters.
++	perBackendRoute := func(backendIndexes ...int) *routev3.Route {
++		var clusters []*routev3.WeightedCluster_ClusterWeight
++		for _, i := range backendIndexes {
++			clusters = append(clusters, &routev3.WeightedCluster_ClusterWeight{
++				Name: fmt.Sprintf("httproute/default/myroute/rule/0/backend/%d", i),
++			})
++		}
++		return &routev3.Route{
++			Name: "test",
++			Action: &routev3.Route_Route{
++				Route: &routev3.RouteAction{
++					ClusterSpecifier: &routev3.RouteAction_WeightedClusters{
++						WeightedClusters: &routev3.WeightedCluster{Clusters: clusters},
++					},
++				},
++			},
++		}
++	}
++
++	t.Run("per-backend clusters with one quota backend returns true", func(t *testing.T) {
++		result := s.routeHasQuotaBackend(context.Background(), perBackendRoute(0, 1), quotaBackendPolicies)
++		require.True(t, result)
++	})
++
++	t.Run("per-backend cluster of a backend without quota returns false", func(t *testing.T) {
++		result := s.routeHasQuotaBackend(context.Background(), perBackendRoute(1), quotaBackendPolicies)
++		require.False(t, result)
++	})
++
++	t.Run("single per-backend cluster with quota backend returns true", func(t *testing.T) {
++		route := &routev3.Route{
++			Name: "test",
++			Action: &routev3.Route_Route{
++				Route: &routev3.RouteAction{
++					ClusterSpecifier: &routev3.RouteAction_Cluster{
++						Cluster: "httproute/default/myroute/rule/0/backend/0",
++					},
++				},
++			},
++		}
++		result := s.routeHasQuotaBackend(context.Background(), route, quotaBackendPolicies)
++		require.True(t, result)
++	})
++
+ 	t.Run("weighted clusters with none matching returns false", func(t *testing.T) {
+ 		route := &routev3.Route{
+ 			Name: "test",
+@@ -2055,6 +2136,7 @@ func TestPatchRoutesWithQuotaRateLimits(t *testing.T) {
+ 				{
+ 					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+ 						{Name: "backend-a", ModelNameOverride: "gpt-4-turbo"},
++						{Name: "backend-b", ModelNameOverride: "gpt-4-turbo"},
+ 					},
+ 				},
+ 			},
+@@ -2111,6 +2193,59 @@ func TestPatchRoutesWithQuotaRateLimits(t *testing.T) {
+ 		require.Contains(t, route.TypedPerFilterConfig, quotaRateLimitFilterName)
+ 	})
+ 
++	// Regression test: when Envoy Gateway creates one cluster per backend, the route points at
++	// "httproute/{namespace}/{routeName}/rule/{ruleIndex}/backend/{backendRefIndex}" clusters, and the
++	// QuotaPolicy must still be applied to it.
++	perBackendRouteConfig := func(backendIndexes ...int) *routev3.RouteConfiguration {
++		var clusters []*routev3.WeightedCluster_ClusterWeight
++		for _, i := range backendIndexes {
++			clusters = append(clusters, &routev3.WeightedCluster_ClusterWeight{
++				Name: fmt.Sprintf("httproute/default/gpt-4/rule/0/backend/%d", i),
++			})
++		}
++		return &routev3.RouteConfiguration{
++			VirtualHosts: []*routev3.VirtualHost{
++				{
++					Routes: []*routev3.Route{
++						{
++							Name:     "per-backend-route",
++							Metadata: aiGatewayRouteMetadata(t),
++							Action: &routev3.Route_Route{
++								Route: &routev3.RouteAction{
++									ClusterSpecifier: &routev3.RouteAction_WeightedClusters{
++										WeightedClusters: &routev3.WeightedCluster{Clusters: clusters},
++									},
++								},
++							},
++						},
++					},
++				},
++			},
++		}
++	}
++
++	t.Run("patches route with per-backend clusters", func(t *testing.T) {
++		routeConfig := perBackendRouteConfig(0, 1)
++
++		s.patchRoutesWithQuotaRateLimits(context.Background(), routeConfig, quotaBackendPolicies)
++
++		route := routeConfig.VirtualHosts[0].Routes[0]
++		require.Contains(t, route.TypedPerFilterConfig, quotaRateLimitFilterName)
++
++		perRoute := &ratelimitfilterv3.RateLimitPerRoute{}
++		require.NoError(t, route.TypedPerFilterConfig[quotaRateLimitFilterName].UnmarshalTo(perRoute))
++		require.NotEmpty(t, perRoute.RateLimits)
++	})
++
++	t.Run("skips route whose only per-backend cluster has no quota backend", func(t *testing.T) {
++		routeConfig := perBackendRouteConfig(1)
++
++		s.patchRoutesWithQuotaRateLimits(context.Background(), routeConfig, quotaBackendPolicies)
++
++		route := routeConfig.VirtualHosts[0].Routes[0]
++		require.Nil(t, route.TypedPerFilterConfig)
++	})
++
+ 	t.Run("skips route without AI gateway annotation", func(t *testing.T) {
+ 		routeConfig := &routev3.RouteConfiguration{
+ 			VirtualHosts: []*routev3.VirtualHost{
+-- 
+2.54.0 (Apple Git-157)
+

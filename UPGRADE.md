@@ -7,8 +7,8 @@ Current pins:
 
 | Component | Version | Pinned in |
 |---|---|---|
-| Envoy Gateway (`gateway-helm`) | `v1.9.1` | `charts/envoy-gateway-openshift/Chart.yaml` |
-| Envoy AI Gateway (`ai-gateway-helm`) | `v1.1.0` | `charts/envoy-ai-gateway-openshift/Chart.yaml` |
+| Envoy Gateway (`gateway-helm`) | `v1.9.2` | `charts/envoy-gateway-openshift/Chart.yaml` |
+| Envoy AI Gateway (`ai-gateway-helm`) | `v1.2.0` | `charts/envoy-ai-gateway-openshift/Chart.yaml` |
 | Envoy data plane | `distroless-v1.39.1` | `charts/envoy-gateway-openshift/values.yaml` |
 | LeaderWorkerSet (`lws`) | `v0.10.0` | `charts/lws-openshift/Chart.yaml` |
 | KServe (`kserve-llmisvc-resources`) | `v0.21.0-rc1` | `charts/kserve-llmisvc-openshift/Chart.yaml` |
@@ -79,7 +79,7 @@ Everything else is `helm dependency update`.
 
 ```bash
 EG_NEW=v1.10.0            # the Envoy Gateway version you are moving to
-AIGW_NEW=v1.2.0           # the Envoy AI Gateway version you are moving to
+AIGW_NEW=v1.3.0           # the Envoy AI Gateway version you are moving to
 LWS_NEW=v0.11.0           # the LeaderWorkerSet version you are moving to
 KSERVE_NEW=v0.22.0-rc0    # the KServe chart tag you are moving to
 ```
@@ -109,10 +109,11 @@ KSERVE_VERSION=v0.21.0
 recorded reason not to. `LWS_VERSION` in particular: bump
 `charts/lws-openshift` to whatever KServe pins, not to the newest LWS release.
 
-Two are not followed, both forced rather than chosen:
+Three are not followed. Two are forced rather than chosen, and one is a
+choice:
 
 * **`GATEWAY_API_VERSION`** — owned by `cluster-ingress-operator`, never ours.
-* **`ENVOY_GATEWAY_VERSION`** — we run v1.9.1, not v1.8.1. v1.8.1 watches the
+* **`ENVOY_GATEWAY_VERSION`** — we run v1.9.2, not v1.8.1. v1.8.1 watches the
   experimental `ListenerSet` kind unconditionally and crash-loops on a
   standard-channel cluster. **Re-test this on every KServe bump**, because the
   moment KServe pins v1.9.x or later the exception should be dropped:
@@ -125,7 +126,15 @@ Two are not followed, both forced rather than chosen:
   ```
 
   If that prints `0`, do not bump to it, whatever KServe pins. Record the
-  decision in README's "Why Envoy Gateway is v1.9.1 and not KServe's v1.8.1".
+  decision in README's "Why Envoy Gateway is v1.9.2 and not KServe's v1.8.1".
+
+* **`ENVOY_AI_GATEWAY_VERSION`** — we run v1.2.0, not KServe v0.21.0's
+  v1.1.0. This one is chosen: v1.2.0 fixes token accounting on streams and
+  needs no CRD storage migration. It was run against KServe v0.21.0's CRDs
+  and Gateway API Inference Extension v1.5.0 CRDs, which this repo keeps,
+  although v1.2.0 is built against v1.6. See
+  [`UPGRADE-v1.2.0.md`](UPGRADE-v1.2.0.md) for what was tested. Drop the
+  exception when KServe pins v1.2.0 or later.
 
 Also check whether the OCI chart tag exists at all before bumping, because
 KServe's release tag and its chart tag have diverged before:
@@ -169,8 +178,8 @@ Only bump what you actually mean to; each chart is independent. The two KServe
 subcharts live in the same `Chart.yaml` and move together — the `-g` does both.
 
 ```bash
-sed -i '' "s/version: v1.9.1/version: $EG_NEW/"   charts/envoy-gateway-openshift/Chart.yaml
-sed -i '' "s/version: v1.1.0/version: $AIGW_NEW/" charts/envoy-ai-gateway-openshift/Chart.yaml
+sed -i '' "s/version: v1.9.2/version: $EG_NEW/"   charts/envoy-gateway-openshift/Chart.yaml
+sed -i '' "s/version: v1.2.0/version: $AIGW_NEW/" charts/envoy-ai-gateway-openshift/Chart.yaml
 sed -i '' "s/v0.10.0/$LWS_NEW/g"                  charts/lws-openshift/Chart.yaml
 sed -i '' "s/v0.21.0-rc1/$KSERVE_NEW/g"           charts/kserve-llmisvc-openshift/Chart.yaml
 
@@ -232,7 +241,7 @@ same thing.
 ```bash
 python3 - <<'PY'
 import yaml, tarfile, subprocess, tempfile, os, glob
-OLD, NEW = "v1.9.1", os.environ.get("EG_NEW", "v1.10.0")
+OLD, NEW = "v1.9.2", os.environ.get("EG_NEW", "v1.10.0")
 CHART = "gateway-helm"
 d = tempfile.mkdtemp()
 for v in (OLD, NEW):

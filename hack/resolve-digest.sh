@@ -2,7 +2,7 @@
 #
 # Prints the manifest digest of an image reference without pulling it.
 #
-#   hack/resolve-digest.sh docker.io/envoyproxy/gateway:v1.9.1
+#   hack/resolve-digest.sh docker.io/envoyproxy/gateway:v1.9.2
 #   hack/resolve-digest.sh $(hack/list-images.sh)     # one per line
 #
 # Anonymous access only -- fine for docker.io, ghcr.io and registry.k8s.io,

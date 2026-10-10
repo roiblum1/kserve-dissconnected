@@ -15,14 +15,14 @@ mirror:
             - name: stable-v1
 
   additionalImages:
-    # Envoy Gateway v1.9.1
-    - name: docker.io/envoyproxy/gateway:v1.9.1
+    # Envoy Gateway v1.9.2
+    - name: docker.io/envoyproxy/gateway:v1.9.2
     - name: docker.io/envoyproxy/envoy:distroless-v1.39.1
-    - name: docker.io/envoyproxy/ratelimit:8fe6ea42
+    - name: docker.io/envoyproxy/ratelimit:0482748e
 
-    # Envoy AI Gateway v1.1.0
-    - name: docker.io/envoyproxy/ai-gateway-controller:v1.1.0
-    - name: docker.io/envoyproxy/ai-gateway-extproc:v1.1.0
+    # Envoy AI Gateway v1.2.0
+    - name: docker.io/envoyproxy/ai-gateway-controller:v1.2.0
+    - name: docker.io/envoyproxy/ai-gateway-extproc:v1.2.0
 
     # LeaderWorkerSet v0.10.0
     - name: registry.k8s.io/lws/lws:v0.10.0

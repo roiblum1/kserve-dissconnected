@@ -53,17 +53,17 @@ Three categories, and the distinction matters when judging risk:
 | **ADDED** | the key does **not** exist in upstream's `values.yaml` | Low. These are free-form config blocks (`config.envoyGateway.*`) or upstream-published contracts |
 | **restated** | the key exists upstream with the **same** value | None. Present only so the knob is visible without extracting the subchart. Deleting them changes nothing |
 
-**8 overrides** is the number that matters. `lws` and `kserve-runtime-configs`
+**9 overrides** is the number that matters. `lws` and `kserve-runtime-configs`
 are installed with upstream's values verbatim; `ai-gateway-helm` has one
 override, forced by Argo CD.
 
 ---
 
-## 2. The 8 overrides
+## 2. The 9 overrides
 
 Ranked by what breaks if you omit them.
 
-### `gateway-helm` v1.9.1 — 2 overrides
+### `gateway-helm` v1.9.2 — 2 overrides
 
 | Key | Upstream | Ours |
 |---|---|---|
@@ -118,7 +118,7 @@ it never reaches `mirror-config.yaml` and every Envoy pod hits
 | `kserve.storage.image` | `kserve/storage-initializer` | `docker.io/kserve/storage-initializer` | Same reasoning; this is the image in the `default` `ClusterStorageContainer` that fetches model weights. **Defensive, not strictly required.** |
 | `kserve.llmisvc.controller.imagePullPolicy` | `Always` | `IfNotPresent` | `Always` makes every pod restart depend on the registry being reachable, even though the image is already on the node. **The most opinionated change in this repo** — drop it if you would rather stay byte-identical to upstream. |
 
-### `ai-gateway-helm` v1.1.0 — 1 override
+### `ai-gateway-helm` v1.2.0 — 2 overrides
 
 | Key | Upstream | Ours |
 |---|---|---|
@@ -134,6 +134,22 @@ selfHeal, rewrites the webhook keypair on every sync. With cert-manager the
 Secret leaves the render, a `Certificate` and a selfSigned `Issuer` replace it,
 and two renders are byte-identical. cert-manager is already required for
 KServe, so no new dependency. Plain Helm does not need it but is not harmed.
+
+| Key | Upstream | Ours |
+|---|---|---|
+| `controller.mcp.sessionEncryption.seed` | `""` | **`default-insecure-seed`** |
+
+New in v1.2.0, and the same problem. With an empty seed upstream `lookup`s the
+Secret it created earlier and otherwise generates a random one (measured: two
+consecutive renders of v1.2.0 differ only in
+`ai-gateway-controller-mcp-session-encryption`).
+
+*Without it, under Argo CD:* the Application is permanently OutOfSync and the
+seed changes on every sync, which ends every MCP session. The fixed value is
+what every release up to v1.1.0 used. It is public, so it protects nothing; it
+is acceptable only because this stack serves no `MCPRoute`. Before creating
+one, put a random seed in a Secret and name it in
+`controller.mcp.sessionEncryption.existingSecret`.
 
 ### `kserve-runtime-configs` v0.21.0-rc1 and `lws` v0.10.0 — zero overrides
 
@@ -154,7 +170,7 @@ overridden.
 ### `gateway-helm` — 13
 
 **One is upstream AI Gateway's own InferencePool add-on**, re-keyed from
-`https://raw.githubusercontent.com/envoyproxy/ai-gateway/v1.1.0/examples/inference-pool/envoy-gateway-values-addon.yaml`:
+`https://raw.githubusercontent.com/envoyproxy/ai-gateway/v1.2.0/examples/inference-pool/envoy-gateway-values-addon.yaml`:
 
 ```
 config.envoyGateway.extensionManager.backendResources = [{group: inference.networking.k8s.io, kind: InferencePool, version: v1}]
@@ -168,7 +184,7 @@ Envoy Gateway watches this kind from startup, which is why the InferencePool
 CRDs ship in the same chart (§5).
 
 **Nine are upstream AI Gateway's own published contract**, copied from
-`https://raw.githubusercontent.com/envoyproxy/ai-gateway/v1.1.0/manifests/envoy-gateway-values.yaml`:
+`https://raw.githubusercontent.com/envoyproxy/ai-gateway/v1.2.0/manifests/envoy-gateway-values.yaml`:
 
 ```
 config.envoyGateway.extensionApis.enableBackend                                  = true
@@ -190,7 +206,7 @@ xDS translation.
 **One works around a mutable upstream default:**
 
 ```
-config.envoyGateway.provider.kubernetes.shutdownManager.image = docker.io/envoyproxy/gateway:v1.9.1
+config.envoyGateway.provider.kubernetes.shutdownManager.image = docker.io/envoyproxy/gateway:v1.9.2
 ```
 
 Envoy Gateway's compiled-in default (`api/v1alpha1.DefaultShutdownManagerImage`)
@@ -358,7 +374,7 @@ Two deviations, both forced:
 | KServe pins | Ours | Why |
 |---|---|---|
 | `GATEWAY_API_VERSION=v1.5.1` | v1.4.1 standard | Owned by `cluster-ingress-operator`. Never ours to change |
-| `ENVOY_GATEWAY_VERSION=v1.8.1` | **v1.9.1** | v1.8.1 **cannot start** on a cluster with standard-channel Gateway API. See below |
+| `ENVOY_GATEWAY_VERSION=v1.8.1` | **v1.9.2** | v1.8.1 **cannot start** on a cluster with standard-channel Gateway API. See below |
 
 ### Why v1.8.1 cannot be used, even from a clean install
 
@@ -403,17 +419,17 @@ The probe fields each version has:
 | v1.8.1 | backend, btp, ctp, eep, ep, epp, hrf, serviceImport, sp, tcpRoute, udpRoute |
 | v1.9.1 | all of those **+ listenerSet**, btls, grpcRoute, tlsRoute, extBackend |
 
-Options, and why v1.9.1 was chosen:
+Options, and why v1.9.2 was chosen:
 
 | Option | Verdict |
 |---|---|
 | Install experimental-channel Gateway API cluster-wide | **No.** Overwrites the ingress-operator's standard-channel CRDs for every tenant |
 | Install only `listenersets.gateway.networking.k8s.io` from the experimental channel | Additive rather than destructive, so *possible*. Not taken: it adds an experimental kind to an API group the ingress-operator owns and continuously reconciles. Untested here by choice — ask if you want it evaluated |
-| Envoy Gateway v1.9.1 | **Taken.** Needs no cluster-scoped change at all |
+| Envoy Gateway v1.9.2 | **Taken.** Needs no cluster-scoped change at all |
 
 Compatibility was checked, not assumed: `ExtensionManager.BackendResources`
 (the `backendResources` field in `values.yaml`) exists in **both** versions; AI
-Gateway v1.1.0 runs against v1.9.1 with the Gateway reaching
+Gateway v1.2.0 runs against v1.9.2, the version it is built with, with the Gateway reaching
 `PROGRAMMED=True` and the `InferencePool` ext_proc cluster present in the Envoy
 config dump; and the measured Gateway API field gap to v1.4.1 is **identical**
 for v1.5.1 and v1.6.1.
@@ -481,8 +497,8 @@ affect other tenants, and they are the reason this wrapper exists.
 
 # the vendored subcharts are unmodified upstream artifacts
 TMP=$(mktemp -d)
-helm pull oci://docker.io/envoyproxy/gateway-helm              --version v1.9.1       -d "$TMP"
-helm pull oci://docker.io/envoyproxy/ai-gateway-helm           --version v1.1.0       -d "$TMP"
+helm pull oci://docker.io/envoyproxy/gateway-helm              --version v1.9.2       -d "$TMP"
+helm pull oci://docker.io/envoyproxy/ai-gateway-helm           --version v1.2.0       -d "$TMP"
 helm pull oci://registry.k8s.io/lws/charts/lws                 --version v0.10.0      -d "$TMP"
 helm pull oci://ghcr.io/kserve/charts/kserve-llmisvc-resources  --version v0.21.0-rc1 -d "$TMP"
 helm pull oci://ghcr.io/kserve/charts/kserve-runtime-configs    --version v0.21.0-rc1 -d "$TMP"

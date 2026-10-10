@@ -89,4 +89,30 @@ spec:
       protocol: {{ .Values.gateway.listener.protocol }}
       allowedRoutes:
         {{- toYaml .Values.gateway.listener.allowedRoutes | nindent 8 }}
+{{- if .Values.gateway.clientTrafficPolicy.create }}
+---
+#
+# Lets a request body larger than Envoy Gateway's 32 KiB default through.
+# Without it a prompt of more than about 32 KB is answered 413.
+#
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: {{ .Values.gateway.clientTrafficPolicy.name }}
+  namespace: {{ $gwNs }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave.clientTrafficPolicy) | nindent 2 }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.gateway.name }}
+  connection:
+    bufferLimit: {{ .Values.gateway.clientTrafficPolicy.bufferLimit }}
+  {{- with .Values.gateway.clientTrafficPolicy.http2 }}
+  http2:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
 {{- end }}

@@ -29,9 +29,9 @@ ai-gateway:
   controller:
     image:
       repository: REGISTRY.EXAMPLE.COM/envoyproxy/ai-gateway-controller
-      tag: v1.1.0
+      tag: v1.2.0
 
   extProc:
     image:
       repository: REGISTRY.EXAMPLE.COM/envoyproxy/ai-gateway-extproc
-      tag: v1.1.0
+      tag: v1.2.0

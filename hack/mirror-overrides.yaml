@@ -24,3 +24,8 @@ extra:
   # multi-node (tensor/pipeline-parallel) serving needs. Delivered by the
   # NVIDIA Network Operator, which is outside this repo.
   - docker.io/roi12345/doca-ofed-driver:doca3.5.0-26.07-0.7.7.0-0-5.14.0-687.44.1.el9_8.x86_64-rhel9.8-amd64
+  # Envoy AI Gateway v1.2.0 built with patches/agent-router-v1.2.0. The chart
+  # defaults stay upstream's; a cluster is pointed at these with four values.
+  # See UPGRADE_ENVOY_AI_1.2.0-patches.md.
+  - docker.io/roi12345/ai-gateway-controller:v1.2.0-patched.1
+  - docker.io/roi12345/ai-gateway-extproc:v1.2.0-patched.1

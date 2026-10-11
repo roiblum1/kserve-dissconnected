@@ -1,0 +1,96 @@
+{{- if .Values.rateLimit.enabled }}
+{{- $name := .Values.rateLimit.name -}}
+{{- $ns := .Values.gateway.envoyGatewayNamespace -}}
+{{- $secret := .Values.rateLimit.redis.existingSecret | default (printf "%s-redis" $name) -}}
+{{- $wave := .Values.argocd.syncWave.rateLimit -}}
+{{- if not .Values.rateLimit.redis.existingSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secret }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave) | nindent 2 }}
+type: Opaque
+stringData:
+  REDIS_URL: {{ .Values.rateLimit.redis.url | quote }}
+  {{- with .Values.rateLimit.redis.auth }}
+  REDIS_AUTH: {{ . | quote }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave) | nindent 2 }}
+spec:
+  replicas: {{ .Values.rateLimit.replicas }}
+  selector:
+    matchLabels:
+      app: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $name }}
+    spec:
+      containers:
+      - name: ratelimit
+        image: {{ .Values.rateLimit.image }}
+        command: ["/bin/ratelimit"]
+        envFrom:
+        - secretRef:
+            name: {{ $secret }}
+        env:
+        # The limits come from the AI Gateway controller, not from files.
+        - {name: CONFIG_TYPE, value: GRPC_XDS_SOTW}
+        - {name: CONFIG_GRPC_XDS_NODE_ID, value: {{ $name }}}
+        - {name: CONFIG_GRPC_XDS_SERVER_URL, value: "ai-gateway-controller.{{ .Release.Namespace }}.svc.cluster.local:18002"}
+        - {name: REDIS_SOCKET_TYPE, value: tcp}
+        - {name: REDIS_TLS, value: {{ .Values.rateLimit.redis.tls | quote }}}
+        - {name: USE_STATSD, value: "false"}
+        - {name: LOG_LEVEL, value: {{ .Values.rateLimit.logLevel }}}
+        - {name: GRPC_PORT, value: "8081"}
+        - {name: PORT, value: "8080"}
+        - {name: RUNTIME_ROOT, value: /data}
+        - {name: RUNTIME_SUBDIRECTORY, value: ratelimit}
+        - {name: RUNTIME_WATCH_ROOT, value: "false"}
+        - {name: RUNTIME_IGNOREDOTFILES, value: "true"}
+        ports:
+        - {name: grpc, containerPort: 8081}
+        - {name: http, containerPort: 8080}
+        readinessProbe:
+          httpGet: {path: /healthcheck, port: http}
+          periodSeconds: 5
+        {{- with .Values.rateLimit.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: ["ALL"]}
+          runAsNonRoot: true
+          seccompProfile: {type: RuntimeDefault}
+        volumeMounts:
+        - {name: data, mountPath: /data}
+      volumes:
+      - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave) | nindent 2 }}
+spec:
+  selector:
+    app: {{ $name }}
+  ports:
+  - {name: grpc, port: 8081, targetPort: grpc, appProtocol: grpc}
+{{- end }}

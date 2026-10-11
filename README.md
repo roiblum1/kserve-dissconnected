@@ -1,11 +1,12 @@
 # Envoy AI Gateway + KServe LLMInferenceService on OpenShift
 
-Four Helm charts that install [Envoy Gateway](https://gateway.envoyproxy.io/) v1.9.2,
+Five Helm charts. Four install [Envoy Gateway](https://gateway.envoyproxy.io/) v1.9.2,
 [Envoy AI Gateway](https://aigateway.envoyproxy.io/) v1.2.0,
 [LeaderWorkerSet](https://lws.sigs.k8s.io/) v0.10.0 and
 [KServe](https://kserve.github.io/website/) LLMInferenceService v0.21.0 on
 OpenShift, packaged so they are safe to run on a **shared** cluster and
-mirrorable into a **disconnected** registry.
+mirrorable into a **disconnected** registry. The fifth, `charts/llm-model`,
+deploys one model on top of them.
 
 **Built for Argo CD: one Application per chart directory, nothing else.** Each
 chart carries its own CRDs in `crds/` and orders everything inside itself with
@@ -29,6 +30,15 @@ Verified end-to-end on OpenShift 4.22.13 / Kubernetes v1.35.6.
 | `charts/envoy-ai-gateway-openshift` | `envoy-ai-gateway-system` | Envoy AI Gateway control plane + GatewayClass/Gateway/Route, its CRDs |
 | `charts/kserve-llmisvc-openshift` | `kserve` | KServe LLMInferenceService controller, the 13 `LLMInferenceServiceConfig` presets, KServe + llm-d CRDs |
 | `charts/lws-openshift` | `lws-system` | LeaderWorkerSet controller and CRDs — multi-node model serving |
+| `charts/llm-model` | the model's namespace, one release per model | One `LLMInferenceService` with its gateway route, scheduler settings and request classes. Not a wrapper: it has no upstream chart and no CRDs. See [its README](charts/llm-model/README.md) |
+
+The AI Gateway chart can also deploy the rate limit service that enforces
+quotas (`rateLimit.enabled`, on by default; set `rateLimit.redis.url` to your
+Redis, the default address is only a name),
+a second listener with mutual TLS for other sites (`gateway.peers.enabled`) and
+`/healthz/gateway` (`gateway.health.enabled`). These make a cluster a site of
+an aigw-ui fleet; [`charts/llm-model/README.md`](charts/llm-model/README.md)
+has the values, the order to turn them on and what was tested.
 
 | | |
 |---|---|
@@ -42,7 +52,8 @@ Verified end-to-end on OpenShift 4.22.13 / Kubernetes v1.35.6.
 | [`PATCHES.md`](PATCHES.md) | Audit report: every change from upstream, and why |
 | [`UPGRADE.md`](UPGRADE.md) | Version-bump runbook and checklist |
 | [`UPGRADE-v1.2.0.md`](UPGRADE-v1.2.0.md) | The upgrade to Envoy Gateway v1.9.2 and AI Gateway v1.2.0 as it was done: what to mirror, the commands, what went wrong, what was measured, and the two patches |
-| `patches/agent-router-v1.2.0/` | Two fixes that are not in AI Gateway v1.2.0: quotas on multi-site routes, and cached tokens on the Anthropic path |
+| `patches/agent-router-v1.2.0/` | Three fixes that are not in AI Gateway v1.2.0: quotas on multi-site routes, cached tokens on the Anthropic path, and one scheduler filter per pool |
+| [`UPGRADE_ENVOY_AI_1.2.0-patches.md`](UPGRADE_ENVOY_AI_1.2.0-patches.md) | The patched AI Gateway v1.2.0 build: which feature needs which patch, how the images are built, how to move a cluster to them and back |
 | [`CLAUDE.md`](CLAUDE.md) | Working notes and invariants for this repo |
 
 Every chart is a thin wrapper around upstream charts, pulled as Helm

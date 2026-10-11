@@ -33,8 +33,8 @@ KServe stays at v0.21.0 and LeaderWorkerSet at v0.10.0.
 4. **A request larger than 32 KB was refused before this change**, on every
    version. The chart now sets the limit. See
    [the request size limit](#the-request-size-limit).
-5. **Two fixes are not in v1.2.0 and are carried as patches**, for a site
-   that needs them. See [the two patches](#the-two-patches).
+5. **Three fixes are not in v1.2.0 and are carried as patches**, for a site
+   that needs them. See [the three patches](#the-three-patches).
 
 ## What changed in this repository
 
@@ -52,7 +52,7 @@ KServe stays at v0.21.0 and LeaderWorkerSet at v0.10.0.
 | `charts/*/values-mirror.yaml` | image tags |
 | `hack/charts/` | `gateway-crds-helm-v1.9.2.tgz`, `ai-gateway-crds-helm-v1.2.0.tgz` |
 | `mirror-config.yaml` | three image tags, see below |
-| `patches/agent-router-v1.2.0/` | the two patches |
+| `patches/agent-router-v1.2.0/` | the three patches |
 
 Checked and found unchanged, so nothing was edited for them:
 
@@ -280,15 +280,16 @@ What that says:
   not matter. The body size does: 1 MB takes 16 ms more, and a multi-site
   entry route buffers it at the entry gateway and again at the serving one.
 
-## The two patches
+## The three patches
 
-Both are against the tag `v1.2.0` of `theagentrouter/agent-router`, in
-`patches/agent-router-v1.2.0/`. Neither is needed for the upgrade itself.
+All are against the tag `v1.2.0` of `theagentrouter/agent-router`, in
+`patches/agent-router-v1.2.0/`. None is needed for the upgrade itself.
 
 | Patch | What is wrong without it | Upstream |
 |---|---|---|
 | `0001-extensionserver-apply-QuotaPolicy-to-per-backend-clu.patch` | A model whose route has weighted backends, which is every entry route over two or more sites, gets no quota at all: nothing is counted and nobody is refused | Proposed as agent-router pull request #2833 |
 | `0002-translator-keep-cached-tokens-on-Anthropic-requests-.patch` | On `/anthropic/v1/messages` to an OpenAI-style backend such as vLLM, the cached token count is dropped. A cached prompt is charged in full and the client sees no cache read | Not proposed yet |
+| `0003-fix-add-one-InferencePool-ext-proc-filter-per-pool-n.patch` | A model behind an `InferencePool` gets its scheduler filter once per route match that uses the pool, not once. On the lab that was 16 times, so the proxy asked the scheduler up to 16 times for one request. With the scheduler's defaults that is wasted work. With flow control and `concurrency-detector` every request waits out its TTL and gets 429, because the request itself takes all the slots | Merged upstream after v1.2.0 as agent-router pull request #2595. A backport, not our change |
 
 Tested on the lab with both applied:
 
@@ -299,6 +300,15 @@ Tested on the lab with both applied:
 | aigw-ui self-test on the two-site model | not run | passed, 11 of 13 steps |
 | Best-effort with a limit of 30 tokens | not possible, nothing is counted | moved to best-effort at 93% of the budget, served with the class `best-effort`, taken off at the limit, then 429 |
 | The same 100-token prompt twice on `/anthropic/v1/messages`, priced model | 1041 and 1041 credits | 1041 and 177 credits; the answer shows `cache_read_input_tokens: 96` |
+
+Tested on the lab with the third patch as well (KServe 0.21, endpoint
+picker v0.10.0, a model limited to two requests at a time):
+
+| Check | Without 0003 | With 0003 |
+|---|---|---|
+| Scheduler filters for the model in the proxy's listener | 16 | 1 |
+| One request to an idle model, flow control with `concurrency-detector` | 429 after 60 s | answered |
+| 8 standard requests, then 6 `best-effort` at 3 s, then 6 standard at 5 s | best-effort answered before the later standard ones | all 14 standard answered first; best-effort answered last or 429 at its TTL |
 
 One thing seen once: a single request got 500 in the seconds in which the
 hub created the best-effort route for a tenant.

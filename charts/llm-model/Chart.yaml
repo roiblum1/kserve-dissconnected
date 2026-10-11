@@ -1,0 +1,6 @@
+apiVersion: v2
+name: llm-model
+description: One model on KServe (LLMInferenceService), exposed through Envoy AI Gateway so that aigw-ui can put a quota and a price on it.
+type: application
+version: 0.1.0
+appVersion: "kserve-0.21 / ai-gateway-1.2.0"

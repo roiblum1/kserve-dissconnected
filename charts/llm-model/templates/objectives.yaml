@@ -1,0 +1,18 @@
+{{- if and .Values.model.scheduler (or .Values.peer.enabled .Values.model.flowControl.enabled) }}
+{{- range $class, $priority := .Values.objectives }}
+# DO NOT REMOVE: a request that names a class the namespace does not have
+# runs at priority 0 without any error.
+apiVersion: llm-d.ai/v1alpha2
+kind: InferenceObjective
+metadata:
+  name: {{ $class }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  priority: {{ $priority }}
+  poolRef:
+    group: inference.networking.k8s.io
+    kind: InferencePool
+    name: {{ include "model.pool" $ }}
+---
+{{- end }}
+{{- end }}

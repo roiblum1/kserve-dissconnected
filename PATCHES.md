@@ -252,8 +252,7 @@ Envoy pods in arbitrary application namespaces.
 
 ## 4. Resources added (templates this repo owns)
 
-Five Kubernetes kinds in templates we wrote, plus upstream's presets
-re-rendered. Nothing upstream is replaced.
+The kinds in templates we wrote, plus upstream's presets re-rendered. Nothing upstream is replaced.
 
 | Resource | Chart | Why |
 |---|---|---|
@@ -263,6 +262,11 @@ re-rendered. Nothing upstream is replaced.
 | `GatewayClass`, `Gateway` | envoy-ai-gateway | Upstream ships no sample wiring. Cluster-scoped `GatewayClass` is additive; uninstalling removes only ours. |
 | `Route` | envoy-ai-gateway | OpenShift-native ingress in place of a LoadBalancer. `spec.port.targetPort` must be the Service **port name** — `targetPort: 80` yields a router 503 while the Service answers 200 in-cluster. Defaults to Envoy Gateway's `irListenerPortName` convention, `lower("<PROTO>-<port>")` → `http-80`. |
 | 13 × `LLMInferenceServiceConfig` | kserve-llmisvc | Upstream's presets, read from the vendored `kserve-runtime-configs` subchart's own `files/llmisvcconfigs/resources.yaml` through `.Subcharts` and rendered by `templates/llmisvcconfigs.yaml` with `argocd.argoproj.io/sync-wave: "10"`. Otherwise identical (verified by parsing both renders). Needed because the controller's `failurePolicy: Fail` webhook for this kind has no endpoints until the controller is Ready, and neither upstream template offers an annotation hook. The subchart's own copy stays off (`llmisvcConfigs.enabled: false`, guarded). |
+| `ClientTrafficPolicy` | envoy-ai-gateway | `connection.bufferLimit` (else 413 above 32 KiB). Also removes ten request headers that only the gateway itself may set (`gateway.clientTrafficPolicy.removeRequestHeaders`: the tenant header, the scheduler's class and endpoint headers) and sets the idle timeout to 3600s so a slow streamed answer is not cut. |
+| `Deployment`, `Service`, `Secret` `envoy-ai-gateway-ratelimit` | envoy-ai-gateway | On by default (`rateLimit.enabled`), with a default Redis address that is only a name: this repo deploys no Redis, so set `rateLimit.redis.url` or `existingSecret`. Upstream only points the controller at this service and does not deploy it; without it a `QuotaPolicy` is accepted and never enforced. Runs in the Envoy Gateway namespace. Its image is already in the mirror list. |
+| Peer listener: `Issuer`/`ClusterIssuer`, 2 × `Certificate`, `ConfigMap`, `ClientTrafficPolicy peers` | envoy-ai-gateway | Off by default (`gateway.peers.enabled`). A second listener on 8443 that asks for a client certificate, for requests from other sites of an aigw-ui fleet. |
+| `HTTPRouteFilter`, `HTTPRoute`, `SecurityPolicy` for `/healthz/gateway` | envoy-ai-gateway | Off by default (`gateway.health.enabled`). A 200 from the proxy itself, exempt from API-key auth, for a load balancer in front of several sites. |
+| `PodDisruptionBudget`, drain settings, JSON access log on the `EnvoyProxy` | envoy-ai-gateway | Off by default (`gateway.envoyProxy.pdb`, `.shutdown`, `.accessLog`). |
 | Sync-wave annotations | envoy-ai-gateway | `argocd.syncWave.*`: SCC binding -5, EnvoyProxy 0, GatewayClass 1, Gateway 2, Route 3. Creating the Gateway only after the AI Gateway controller is healthy replaces the plain-Helm `oc rollout restart deployment/envoy-gateway`. Helm ignores them. |
 | `_validate.tpl` | envoy-gateway, envoy-ai-gateway, kserve-llmisvc | Render-time guards for mistakes that produce a healthy-looking install and fail at first use. See §7. |
 
@@ -358,8 +362,10 @@ render errors.
 | subchart presets off while `runtimeConfigs.enabled` | kserve-llmisvc | Every preset rendered twice, once without its sync wave |
 | `gateway.envoyGatewayNamespace` == `ai-gateway.envoyGateway.namespace` | envoy-ai-gateway | A Route pointing at an endpoint-less Service |
 | SCC enabled ⇒ a subject is set | all with SCC | A binding that grants nothing, so pods fail admission |
+| `rateLimit.enabled` ⇒ a Redis address or Secret (trips only when the default address is emptied) | envoy-ai-gateway | A rate limit service that cannot start, so quotas are not enforced |
+| `gateway.peers.enabled` ⇒ `gateway.site` and `gateway.peers.serverName` | envoy-ai-gateway | A peer listener whose certificate no other site accepts |
 
-All nine were tested by deliberately tripping them.
+All eleven were tested by deliberately tripping them.
 
 ---
 

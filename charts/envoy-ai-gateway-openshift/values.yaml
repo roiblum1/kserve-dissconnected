@@ -319,18 +319,20 @@ gateway:
 # which reads the counters from it.
 # ---------------------------------------------------------------------------
 rateLimit:
-  # Off by default because the Redis address has no default and this chart
-  # must render with no overrides. Turn it on wherever a QuotaPolicy is used:
-  # without this service a quota is accepted and never enforced.
-  enabled: false
+  # Without this service a QuotaPolicy is accepted and never enforced.
+  enabled: true
   name: envoy-ai-gateway-ratelimit
   image: docker.io/envoyproxy/ratelimit:0482748e
   replicas: 1
   logLevel: info
   resources: {}
   redis:
-    # host:port. Required unless existingSecret is set.
-    url: ""
+    # host:port. Required unless existingSecret is set. The default is only a
+    # name that lets the chart render with no overrides: this repo deploys no
+    # Redis. Point it at the Redis all sites and aigw-ui share. While it is
+    # unreachable the rate limit pod does not become ready and quotas are
+    # not enforced.
+    url: "redis.envoy-gateway-system.svc.cluster.local:6379"
     # Password, if Redis asks for one.
     auth: ""
     tls: false

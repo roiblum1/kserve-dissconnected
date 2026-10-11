@@ -5,7 +5,8 @@ Written and tested on the lab (OpenShift 4.22, KServe 0.21, Envoy Gateway
 This page covers two charts: what `charts/envoy-ai-gateway-openshift` adds so
 that aigw-ui can count, price and limit a model, and `charts/llm-model`,
 which deploys one model. Both were developed outside this repo and moved in
-unchanged, except that the rate limit service is now off by default.
+unchanged, except that the rate limit service now has a default Redis
+address so the chart renders with no overrides.
 
 ## charts/envoy-ai-gateway-openshift
 
@@ -22,7 +23,7 @@ Already in the repo's chart since the 1.2.0 upgrade, check that yours has them:
   default is random on every render, which Argo CD sees as a change forever.
 
     helm upgrade --install envoy-ai-gateway charts/envoy-ai-gateway-openshift -n envoy-ai-gateway-system \
-      --set rateLimit.enabled=true --set rateLimit.redis.url=<redis host>:6379
+      --set rateLimit.redis.url=<redis host>:6379
 
 Tested: the rate limit service of this chart started on the lab under a
 test name and connected to Redis and the controller. The whole chart was

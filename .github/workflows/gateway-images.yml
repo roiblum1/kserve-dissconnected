@@ -45,21 +45,22 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Stop if the tag already exists
+      # An image that is already there is left alone; only a missing one is
+      # built. Both binaries call themselves UPSTREAM_REF, so one built in a
+      # later run still works with the other.
+      - name: Find what is missing
         id: exists
         run: |
-          found=0
+          todo=""
           for c in controller extproc; do
             if docker manifest inspect "$REGISTRY/ai-gateway-$c:$IMAGE_TAG" >/dev/null 2>&1; then
               echo "::notice::$REGISTRY/ai-gateway-$c:$IMAGE_TAG exists, not overwriting"
-              found=$((found+1))
+            else
+              todo="$todo $c"
             fi
           done
-          if [ "$found" = 1 ]; then
-            echo "::error::only one of the two images exists under $IMAGE_TAG; use a new IMAGE_TAG"
-            exit 1
-          fi
-          if [ "$found" = 2 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
+          echo "todo=$todo" >> "$GITHUB_OUTPUT"
+          if [ -z "$todo" ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
 
       - name: Apply the patches
         if: steps.exists.outputs.skip != 'true'
@@ -89,7 +90,7 @@ jobs:
         working-directory: src
         run: |
           V="-X github.com/envoyproxy/ai-gateway/internal/version.version=${UPSTREAM_REF}-0-g$(git rev-parse --short=8 HEAD)"
-          for c in controller extproc; do
+          for c in ${{ steps.exists.outputs.todo }}; do
             mkdir -p "out/$c"
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w $V" -o "out/$c/app" "./cmd/$c"
             printf '%s\n' \

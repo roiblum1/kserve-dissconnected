@@ -157,6 +157,9 @@ hub is given cluster-admin kubeconfigs; that was decided earlier.
 | `model.revision`, `model.capacityPerInstance`, `model.maxModelLen` | The three annotations aigw-ui reads. `maxModelLen` also renders `--max-model-len` |
 | `model.scoring.weights` (`prefix`, `queue`, `kvCache`, `noHitLru`), `model.scoring.custom` | The scheduler's weights, 3 : 2 : 2 : 2 as before. Always used with flow control; `custom=true` uses them without it. Tested on the lab with queue 5, with and without flow control: the scheduler started with the new weights and answered. The effect on latency and cache hits is not measured |
 | `model.scoring.scorers`, `model.scoring.producers` | Another set of scorers, by plugin type and weight, with the data producers they read. Replaces `weights` when not empty. Written for a config that counts load in the scheduler: `active-request-scorer` 3, `token-load-scorer` 1, `prefix-cache-scorer` 1 with `approx-prefix-cache-producer` and `inflight-load-producer`. Run on the lab on 2026-10-11 with flow control on, see below |
+| `model.flowControl.negativeBandMaxRequests`, `.enableEviction` | How many requests below priority 0 may wait; above it they get 429 at once |
+| `namespace.create` | The Namespace with the label the peer listener asks for |
+| `alerts.enabled` | A `PrometheusRule` on the scheduler's queue. Rendered, not tested |
 
 Three scorer sets on the lab, 3 replicas of the 0.5B CPU model, 12
 conversations of 6 turns sent at once on `/v1/chat/completions`, each with its
@@ -172,10 +175,6 @@ the cache hit rate and the spread do carry over.
 
 The first turn of a conversation can never hit the cache, so about 80% is
 the ceiling of this workload.
-
-| `model.flowControl.negativeBandMaxRequests`, `.enableEviction` | How many requests below priority 0 may wait; above it they get 429 at once |
-| `namespace.create` | The Namespace with the label the peer listener asks for |
-| `alerts.enabled` | A `PrometheusRule` on the scheduler's queue. Rendered, not tested |
 
 Moving a model without a gap:
 

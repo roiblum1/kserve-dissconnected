@@ -42,7 +42,10 @@ A new patch set gets a new tag (`v1.2.0-patched.2`). Never push over a tag.
 
 ### Building them
 
-Needs the internet, or a Go module proxy, once.
+CI does it: `.github/workflows/gateway-images.yml` runs when a patch or the
+workflow changes, and pushes both images under `IMAGE_TAG`. It never
+overwrites a tag, so a new patch set needs a new `IMAGE_TAG` there. By hand it
+is the same steps, and needs the internet, or a Go module proxy, once:
 
 ```bash
 git clone https://github.com/theagentrouter/agent-router && cd agent-router
@@ -124,7 +127,7 @@ model: with stock v1.2.0 it answers every request with 429.
 
 ## Not done
 
-- The images are built by hand with the commands above, not by CI.
+
 - Patch 0002 here is the first version. Cache writes on the Anthropic path
   are still charged as plain input.
 - Upstream pull request #2766 (a changed `QuotaPolicy` did not always reach

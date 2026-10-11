@@ -1,0 +1,108 @@
+# Builds Envoy AI Gateway from an upstream tag plus the patches in patches/
+# and pushes the controller and extproc images to Docker Hub.
+#
+# The tag below is pushed once and never overwritten: a new patch set needs a
+# new IMAGE_TAG. See UPGRADE_ENVOY_AI_1.2.0-patches.md.
+#
+# Needs the repository secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN.
+name: gateway-images
+
+on:
+  push:
+    paths:
+      - .github/workflows/gateway-images.yml
+      - patches/agent-router-v1.2.0/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: theagentrouter/agent-router
+  UPSTREAM_REF: v1.2.0
+  PATCH_DIR: patches/agent-router-v1.2.0
+  IMAGE_TAG: v1.2.0-patched.1
+  REGISTRY: docker.io/roi12345
+
+concurrency:
+  group: gateway-images
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ env.UPSTREAM_REF }}
+          path: src
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # An image that is already there is left alone; only a missing one is
+      # built. Both binaries call themselves UPSTREAM_REF, so one built in a
+      # later run still works with the other.
+      - name: Find what is missing
+        id: exists
+        run: |
+          todo=""
+          for c in controller extproc; do
+            if docker manifest inspect "$REGISTRY/ai-gateway-$c:$IMAGE_TAG" >/dev/null 2>&1; then
+              echo "::notice::$REGISTRY/ai-gateway-$c:$IMAGE_TAG exists, not overwriting"
+            else
+              todo="$todo $c"
+            fi
+          done
+          echo "todo=$todo" >> "$GITHUB_OUTPUT"
+          if [ -z "$todo" ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Apply the patches
+        if: steps.exists.outputs.skip != 'true'
+        working-directory: src
+        run: |
+          git config user.name ci
+          git config user.email ci@users.noreply.github.com
+          git am "$GITHUB_WORKSPACE/$PATCH_DIR"/*.patch
+          git log --oneline -5
+
+      - uses: actions/setup-go@v5
+        if: steps.exists.outputs.skip != 'true'
+        with:
+          go-version-file: src/go.mod
+          cache-dependency-path: src/go.sum
+
+      - name: Test the patched packages
+        if: steps.exists.outputs.skip != 'true'
+        working-directory: src
+        run: go test ./internal/extensionserver/ ./internal/translator/
+
+      # The version must parse as a release, "<tag>-0-g<commit>", and be the
+      # same in both binaries: a controller and an extproc that disagree
+      # refuse each other's configuration.
+      - name: Build and push
+        if: steps.exists.outputs.skip != 'true'
+        working-directory: src
+        run: |
+          V="-X github.com/envoyproxy/ai-gateway/internal/version.version=${UPSTREAM_REF}-0-g$(git rev-parse --short=8 HEAD)"
+          for c in ${{ steps.exists.outputs.todo }}; do
+            mkdir -p "out/$c"
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w $V" -o "out/$c/app" "./cmd/$c"
+            printf '%s\n' \
+              'FROM gcr.io/distroless/static-debian12:nonroot' \
+              'COPY --chmod=755 app /app' \
+              'USER nonroot:nonroot' \
+              'ENTRYPOINT ["/app"]' > "out/$c/Dockerfile"
+            img="$REGISTRY/ai-gateway-$c:$IMAGE_TAG"
+            docker build --platform linux/amd64 \
+              --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --label "org.opencontainers.image.description=Envoy AI Gateway ${UPSTREAM_REF} $c with ${PATCH_DIR}" \
+              -t "$img" "out/$c"
+            docker push "$img"
+            echo "- \`$img\` $(docker inspect --format '{{index .RepoDigests 0}}' "$img" | sed 's/.*@//')" >> "$GITHUB_STEP_SUMMARY"
+          done

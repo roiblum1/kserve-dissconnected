@@ -156,6 +156,7 @@ hub is given cluster-admin kubeconfigs; that was decided earlier.
 | `gateway.clientListener` | Pins the direct route and KServe's route to the client listener |
 | `model.revision`, `model.capacityPerInstance`, `model.maxModelLen` | The three annotations aigw-ui reads. `maxModelLen` also renders `--max-model-len` |
 | `model.scoring.weights` (`prefix`, `queue`, `kvCache`, `noHitLru`), `model.scoring.custom` | The scheduler's weights, 3 : 2 : 2 : 2 as before. Always used with flow control; `custom=true` uses them without it. Tested on the lab with queue 5, with and without flow control: the scheduler started with the new weights and answered. The effect on latency and cache hits is not measured |
+| `model.scoring.scorers`, `model.scoring.producers` | Another set of scorers, by plugin type and weight, with the data producers they read. Replaces `weights` when not empty. Written for a config that counts load in the scheduler: `active-request-scorer` 3, `token-load-scorer` 1, `prefix-cache-scorer` 1 with `approx-prefix-cache-producer` and `inflight-load-producer`. Rendered and checked against the endpoint picker v0.10.0 source; not run on a cluster |
 | `model.flowControl.negativeBandMaxRequests`, `.enableEviction` | How many requests below priority 0 may wait; above it they get 429 at once |
 | `namespace.create` | The Namespace with the label the peer listener asks for |
 | `alerts.enabled` | A `PrometheusRule` on the scheduler's queue. Rendered, not tested |

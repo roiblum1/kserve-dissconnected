@@ -156,7 +156,23 @@ hub is given cluster-admin kubeconfigs; that was decided earlier.
 | `gateway.clientListener` | Pins the direct route and KServe's route to the client listener |
 | `model.revision`, `model.capacityPerInstance`, `model.maxModelLen` | The three annotations aigw-ui reads. `maxModelLen` also renders `--max-model-len` |
 | `model.scoring.weights` (`prefix`, `queue`, `kvCache`, `noHitLru`), `model.scoring.custom` | The scheduler's weights, 3 : 2 : 2 : 2 as before. Always used with flow control; `custom=true` uses them without it. Tested on the lab with queue 5, with and without flow control: the scheduler started with the new weights and answered. The effect on latency and cache hits is not measured |
-| `model.scoring.scorers`, `model.scoring.producers` | Another set of scorers, by plugin type and weight, with the data producers they read. Replaces `weights` when not empty. Written for a config that counts load in the scheduler: `active-request-scorer` 3, `token-load-scorer` 1, `prefix-cache-scorer` 1 with `approx-prefix-cache-producer` and `inflight-load-producer`. Rendered and checked against the endpoint picker v0.10.0 source; not run on a cluster |
+| `model.scoring.scorers`, `model.scoring.producers` | Another set of scorers, by plugin type and weight, with the data producers they read. Replaces `weights` when not empty. Written for a config that counts load in the scheduler: `active-request-scorer` 3, `token-load-scorer` 1, `prefix-cache-scorer` 1 with `approx-prefix-cache-producer` and `inflight-load-producer`. Run on the lab on 2026-10-11 with flow control on, see below |
+
+Three scorer sets on the lab, 3 replicas of the 0.5B CPU model, 12
+conversations of 6 turns sent at once on `/v1/chat/completions`, each with its
+own system prompt of about 600 tokens. Two rounds each, all 72 requests
+answered every time. Latency on this model says little about a GPU model;
+the cache hit rate and the spread do carry over.
+
+| Scorers | Cache hit rate | Time to first token, turns 2 to 6, median | P95 | Requests per replica |
+|---|---|---|---|---|
+| Chart default: queue 2, kv-cache 2, prefix 3, no-hit-lru 2 | 75.0%, 75.4% | 2.31 s, 2.15 s | 3.34 s, 2.90 s | 18/24/30, 24/24/24 |
+| active-request 3, token-load 1, prefix 1 | 60.9%, 65.6% | 2.30 s, 2.20 s | 3.12 s, 3.13 s | 24/24/24, 22/23/27 |
+| active-request 3, token-load 1, prefix 3 | 74.1%, 74.9% | 1.99 s, 2.03 s | 2.78 s, 2.93 s | 23/24/25, 24/24/24 |
+
+The first turn of a conversation can never hit the cache, so about 80% is
+the ceiling of this workload.
+
 | `model.flowControl.negativeBandMaxRequests`, `.enableEviction` | How many requests below priority 0 may wait; above it they get 429 at once |
 | `namespace.create` | The Namespace with the label the peer listener asks for |
 | `alerts.enabled` | A `PrometheusRule` on the scheduler's queue. Rendered, not tested |

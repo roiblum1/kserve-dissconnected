@@ -1,0 +1,272 @@
+From 58d9dbf813f56988b381c1c88de217a4efdfa135 Mon Sep 17 00:00:00 2001
+From: Gerrit van Doorn <110573770+gerritvd@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 14:54:03 -0700
+Subject: [PATCH] fix: add one InferencePool ext proc filter per pool, not per
+ route match (#2595)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**Description**
+
+`patchListenerWithInferencePoolFilters` appends one endpoint-picker
+`ext_proc` HTTP filter
+per entry in the `inferencePools` slice it is given. That slice is built
+in
+`maybeModifyListenerAndRoutes` from
+`routeNameToVHRouteNameToInferencePool`, which is keyed
+by xDS route name — so a pool referenced by N route matches appears N
+times, and the
+listener ends up with N identically-named copies of the same filter.
+
+There is already a guard against duplicates, but it only searches
+`httpConManager.HttpFilters`. New filters accumulate in the local
+`poolFilters` slice and are
+not spliced into `httpConManager.HttpFilters` until after the loop, so
+the guard never sees
+what the loop itself just added.
+
+Because `httpFilterNameForInferencePool` is derived from the pool's
+namespace and name, every
+duplicate shares one filter name. Per-route `typed_per_filter_config` is
+keyed by filter name,
+so the existing per-route disable logic cannot express "enable one of
+these and disable the
+rest" — it can only enable or disable the whole set. On the pool's own
+routes the set is
+enabled, so **every** copy runs and opens its own gRPC stream to the
+EPP.
+
+Impact for a single client request, on a Gateway with two InferencePools
+whose HTTPRoutes each
+have 16 InferencePool-backed matches:
+
+- 32 `adding inference pool ext proc filter` log lines per translation
+pass (16 per pool)
+- 32 identically-named `ext_proc` filters in the listener filter chain
+- 16 gRPC streams to the EPP, i.e. 16 full scheduling passes, for one
+request
+
+The last point is the damaging one. It is not only wasted latency and
+16x EPP load: each
+redundant scheduling pass independently mutates EPP scheduler state,
+which makes stateful
+plugins unusable. In our case `no-hit-lru-scorer` rotated its LRU choice
+on every one of the
+16 passes, so cold requests never actually spread across replicas, and
+prefix-cache affinity
+accounting was meaningless.
+
+Reducing the HTTPRoute from 16 InferencePool-backed matches to 12
+reduced the EPP calls from
+16 to 12, confirming the count tracks match count exactly.
+
+Observed on Envoy AI Gateway v1.0.0 with Envoy Gateway v1.8.1 (the
+pinned pairing from the
+v1.0.0 dependency table), Envoy Proxy v1.38.x, using KServe 0.20
+`LLMInferenceService`, which
+generates an HTTPRoute with 8 InferencePool-backed rules — one of them
+carrying 8 path
+matches — for a total of 16. Both affected code paths are unchanged on
+`main`, and the added
+test fails there without this patch.
+
+**Repro**
+
+1. Revert this patch, or apply only the added test.
+2. Run `go test ./internal/extensionserver -run
+'TestPatchListenerWithInferencePoolFilters/repeated_inference_pool_is_added_once'
+-count=1`.
+3. The test fails: four entries for one pool produce five filters (four
+identical
+`envoy.filters.http.ext_proc/endpointpicker/pool1_test-ns_ext_proc` plus
+the router)
+   where two are expected.
+
+**Fix**
+
+Two changes, either of which resolves the reported behavior; together
+they also guard the
+other call path:
+
+1. Deduplicate by `namespace/name` when building
+`listenerToInferencePools`, so the slice
+handed to `patchListenerWithInferencePoolFilters` holds each pool once
+per listener.
+2. Track filter names added within the loop in
+`patchListenerWithInferencePoolFilters`, so the
+   duplicate guard accounts for filters not yet spliced into the chain.
+
+No behavior change for the single-match case, and none for distinct
+pools on a shared
+listener: both existing subtests (`listener with new inference pool
+filter`, `listener with
+multiple inference pools`) pass unmodified.
+
+**Verification**
+
+- `make precommit` passes, with no generated-file churn.
+- `make test` passes.
+- The added test fails on `main` without the fix (five filters for one
+pool where two are
+  expected) and passes with it.
+
+Beyond the unit tests, the patched controller was deployed to a staging
+cluster running the
+two-InferencePool KServe 0.20 setup described above, replacing the
+v1.0.0 controller image.
+The patch applied there is identical to this one. Measured before and
+after, same cluster,
+same HTTPRoutes:
+
+| Measurement | v1.0.0 | this patch |
+|---|---|---|
+| `adding inference pool ext proc filter` per translation pass | 32 | 2
+|
+| EPP gRPC streams per client request | 16 | 1 |
+| Distinct replicas chosen for 5 distinct cold prompts | 1 of 2 | 3/2
+split across both |
+
+Controller logs showed no errors across the rollout and the translation
+pass. The 44 per-route
+`disabling inference pool filter` lines are unchanged and remain
+correct: two HTTPRoutes with
+16 InferencePool-backed matches each disable the other pool's filter,
+and 3 Service-backed
+catch-all matches each disable both.
+
+Cache affinity is preserved rather than traded away for spreading:
+re-sending an already-seen
+prompt three times pinned to the replica that first served it, scoring 2
+points higher there
+from the prefix-cache scorer, while cold prompts continued to alternate.
+
+**Related Issues/PRs (if applicable)**
+
+envoyproxy/gateway#5002 fixed the same class of defect in Envoy Gateway,
+where extension
+filters accumulated one copy per reference and produced multiple matches
+while processing
+routes.
+
+Touches the same InferencePool extension-server path as #2142 (preserve
+InferencePool metadata
+on extension hooks). Overlaps #2517 only in
+`internal/extensionserver/extensionserver_test.go`;
+that PR changes `inferencepool.go` and `post_cluster_modify.go`, so the
+two should rebase
+cleanly past each other.
+
+For context, istio/istio#58392 describes the inverse failure in a
+different implementation:
+multiple InferencePools on one Gateway losing the ext_proc config for
+all but the first.
+
+**Special notes for reviewers (if applicable)**
+
+The dedupe key is `namespace/name` rather than the filter name, since
+`httpFilterNameForInferencePool`
+already derives from both; using the object identity keeps the intent
+clear at the call site.
+
+AI-assisted patch prep; I reviewed the code and own the change.
+
+Signed-off-by: Gerrit van Doorn <gerritd@dropbox.com>
+Co-authored-by: Ignasi Barrera <ignasi@tetrate.io>
+---
+ .../extensionserver/extensionserver_test.go   | 26 +++++++++++++++++++
+ .../extensionserver/post_translate_modify.go  | 17 ++++++++++++
+ 2 files changed, 43 insertions(+)
+
+diff --git a/internal/extensionserver/extensionserver_test.go b/internal/extensionserver/extensionserver_test.go
+index cffde267..b5e8a227 100644
+--- a/internal/extensionserver/extensionserver_test.go
++++ b/internal/extensionserver/extensionserver_test.go
+@@ -1350,6 +1350,32 @@ func TestPatchListenerWithInferencePoolFilters(t *testing.T) {
+ 		require.Equal(t, "envoy.filters.http.router", hcm.HttpFilters[2].Name)
+ 	})
+ 
++	t.Run("repeated inference pool is added once", func(t *testing.T) {
++		existingFilters := []*httpconnectionmanagerv3.HttpFilter{
++			{Name: "envoy.filters.http.router"},
++		}
++
++		listener := createListenerWithHCM("test-listener", existingFilters)
++		// The caller keys inference pools per route match, so a pool reached by several
++		// matches on one listener is passed in several times.
++		pools := []*gwaiev1.InferencePool{
++			createInferencePool("pool1", "test-ns"),
++			createInferencePool("pool1", "test-ns"),
++			createInferencePool("pool1", "test-ns"),
++			createInferencePool("pool1", "test-ns"),
++		}
++
++		s.patchListenerWithInferencePoolFilters(listener, pools)
++
++		// Verify the pool contributed exactly one filter.
++		hcm := &httpconnectionmanagerv3.HttpConnectionManager{}
++		err := listener.DefaultFilterChain.Filters[0].GetTypedConfig().UnmarshalTo(hcm)
++		require.NoError(t, err)
++		require.Len(t, hcm.HttpFilters, 2) // Should have 1 inference pool filter + router.
++		require.Equal(t, httpFilterNameForInferencePool(pools[0]), hcm.HttpFilters[0].Name)
++		require.Equal(t, "envoy.filters.http.router", hcm.HttpFilters[1].Name)
++	})
++
+ 	t.Run("listener with both filter chains and default filter chain", func(t *testing.T) {
+ 		hcm := &httpconnectionmanagerv3.HttpConnectionManager{
+ 			HttpFilters: []*httpconnectionmanagerv3.HttpFilter{
+diff --git a/internal/extensionserver/post_translate_modify.go b/internal/extensionserver/post_translate_modify.go
+index 5b5ba138..dbc9004d 100644
+--- a/internal/extensionserver/post_translate_modify.go
++++ b/internal/extensionserver/post_translate_modify.go
+@@ -711,8 +711,12 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener,
+ 	}
+ 
+ 	// listenerToInferencePools builds a matrix of listeners and the inference pools they use.
++	// routeNameToVHRouteNameToInferencePool is keyed per route match, so a pool reached by
++	// several matches appears several times. A pool needs exactly one ext proc filter per
++	// listener, so deduplicate here.
+ 	listenerToInferencePools := make(map[string][]*gwaiev1.InferencePool)
+ 	for listener, routeCfgNames := range listenerNameToRouteNames {
++		seen := make(map[string]struct{})
+ 		for _, name := range routeCfgNames {
+ 			if routeNameToRoute[name] == nil {
+ 				continue
+@@ -721,6 +725,11 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener,
+ 				continue
+ 			}
+ 			for _, pool := range routeNameToVHRouteNameToInferencePool[name] {
++				key := pool.Namespace + "/" + pool.Name
++				if _, ok := seen[key]; ok {
++					continue
++				}
++				seen[key] = struct{}{}
+ 				if listenerToInferencePools[listener] == nil {
+ 					listenerToInferencePools[listener] = make([]*gwaiev1.InferencePool, 0)
+ 				}
+@@ -788,7 +797,14 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
+ 			continue
+ 		}
+ 		var poolFilters []*httpconnectionmanagerv3.HttpFilter
++		// poolFilters is spliced into httpConManager.HttpFilters only after this loop, so the
++		// search below cannot see what the loop already added. Track those names separately.
++		added := make(map[string]struct{})
+ 		for _, pool := range inferencePools {
++			filterName := httpFilterNameForInferencePool(pool)
++			if _, ok := added[filterName]; ok {
++				continue
++			}
+ 			_, baIndex, searchErr := searchInferencePoolInFilterChain(pool, httpConManager.HttpFilters)
+ 			if searchErr != nil {
+ 				s.log.Error(searchErr, "failed to find an inference pool ext proc filter")
+@@ -802,6 +818,7 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
+ 					s.log.Error(err, "failed to build inference pool ext proc filter", "pool", pool.Name)
+ 					continue
+ 				}
++				added[filterName] = struct{}{}
+ 				poolFilters = append(poolFilters, eppExtProc)
+ 			}
+ 		}
+-- 
+2.54.0 (Apple Git-157)
+

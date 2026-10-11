@@ -1,0 +1,112 @@
+{{- include "model.validate" . -}}
+{{- if .Values.model.create }}
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: {{ .Values.model.name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    aigw-ui.io/capacity-per-instance: {{ .Values.model.capacityPerInstance | quote }}
+    {{- with .Values.model.revision }}
+    aigw-ui.io/model-revision: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.model.maxModelLen }}
+    aigw-ui.io/max-model-len: {{ . | quote }}
+    {{- end }}
+spec:
+  replicas: {{ .Values.model.replicas }}
+  model:
+    name: {{ .Values.model.name }}
+    uri: {{ .Values.model.uri | quote }}
+  {{- if .Values.model.scheduler }}
+  router:
+    {{- /* KServe reports the service ready only when a route of its own is
+           accepted by the gateway, so its route stays. Without the direct
+           route it is on the peer listener, where no client reaches it. */}}
+    route: {}
+    {{- $listener := ternary .Values.gateway.clientListener .Values.peer.listener .Values.route.direct }}
+    {{- if $listener }}
+    gateway:
+      refs:
+      - name: {{ .Values.gateway.name }}
+        namespace: {{ .Values.gateway.namespace }}
+        sectionName: {{ $listener }}
+    {{- else }}
+    gateway: {}
+    {{- end }}
+    {{- $fc := .Values.model.flowControl }}
+    {{- $w := .Values.model.scoring.weights }}
+    {{- if or $fc.enabled .Values.model.scoring.custom }}
+    scheduler:
+      config:
+        inline:
+          apiVersion: llm-d.ai/v1alpha1
+          kind: EndpointPickerConfig
+          {{- if $fc.enabled }}
+          featureGates: [flowControl]
+          {{- end }}
+          plugins:
+          - type: single-profile-handler
+          - type: queue-scorer
+          - type: kv-cache-utilization-scorer
+          - type: prefix-cache-scorer
+          - type: no-hit-lru-scorer
+          - type: max-score-picker
+          {{- if $fc.enabled }}
+          - type: concurrency-detector
+            parameters:
+              maxConcurrency: {{ required "model.flowControl.maxConcurrency is required" $fc.maxConcurrency }}
+          {{- end }}
+          schedulingProfiles:
+          - name: default
+            plugins:
+            - pluginRef: queue-scorer
+              weight: {{ $w.queue }}
+            - pluginRef: kv-cache-utilization-scorer
+              weight: {{ $w.kvCache }}
+            - pluginRef: prefix-cache-scorer
+              weight: {{ $w.prefix }}
+            - pluginRef: no-hit-lru-scorer
+              weight: {{ $w.noHitLru }}
+            - pluginRef: max-score-picker
+          {{- if $fc.enabled }}
+          flowControl:
+            saturationDetector:
+              pluginRef: concurrency-detector
+            defaultRequestTTL: {{ $fc.requestTTL }}
+            {{- with $fc.negativeBandMaxRequests }}
+            defaultNegativePriorityBand:
+              maxRequests: {{ . | quote }}
+            {{- end }}
+            enableEviction: {{ $fc.enableEviction }}
+          {{- end }}
+    {{- else }}
+    scheduler: {}
+    {{- end }}
+  {{- end }}
+  template:
+    {{- if .Values.model.downloadHome }}
+    initContainers:
+    - name: storage-initializer
+      env:
+      - name: HOME
+        value: {{ .Values.model.downloadHome }}
+      - name: HF_HOME
+        value: {{ .Values.model.downloadHome }}/hf
+    {{- end }}
+    containers:
+    - name: main
+      {{- with .Values.model.image }}
+      image: {{ . }}
+      {{- end }}
+      env:
+      - name: VLLM_ADDITIONAL_ARGS
+        value: {{ include "model.vllmArgs" . | quote }}
+      {{- with .Values.model.env }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- with .Values.model.resources }}
+      resources:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

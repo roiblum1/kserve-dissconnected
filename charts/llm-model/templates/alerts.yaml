@@ -1,0 +1,28 @@
+{{- if and .Values.alerts.enabled .Values.model.flowControl.enabled }}
+{{- $pool := include "model.pool" . -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Values.model.name }}-flow-control
+  namespace: {{ .Release.Namespace }}
+spec:
+  groups:
+  - name: {{ .Values.model.name }}-flow-control
+    rules:
+    - alert: StandardRequestsQueued
+      expr: sum(llm_d_epp_flow_control_queue_size{inference_pool="{{ $pool }}",priority=~"[0-9]+"}) > 0
+      for: {{ .Values.alerts.standardQueuedFor }}
+      labels:
+        severity: warning
+      annotations:
+        summary: Requests of priority 0 or above wait in the scheduler of {{ .Values.model.name }}.
+        description: The replicas have been full for {{ .Values.alerts.standardQueuedFor }}. Tenants within their budget are waiting.
+    - alert: BestEffortRefused
+      expr: sum(rate(llm_d_epp_flow_control_requests_total{inference_pool="{{ $pool }}",priority=~"-[0-9]+",outcome!="Dispatched"}[10m])) > 0
+      for: 30m
+      labels:
+        severity: info
+      annotations:
+        summary: The scheduler of {{ .Values.model.name }} refuses requests of the classes below priority 0.
+        description: There has been no spare room for best-effort work for 30 minutes.
+{{- end }}

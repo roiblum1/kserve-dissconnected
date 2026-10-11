@@ -1,0 +1,52 @@
+{{- if and .Values.model.scheduler .Values.route.direct }}
+{{- $name := .Values.model.name -}}
+{{- if not .Values.internalKey.existingSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "model.keySecret" . }}
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+stringData:
+  apiKey: {{ .Values.internalKey.value | quote }}
+---
+{{- end }}
+# KServe's own route accepts only the internal key. A policy on a route
+# replaces the Gateway's key policy for that route, so tenants' keys get 401.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ $name }}-kserve-route
+  namespace: {{ .Release.Namespace }}
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: {{ $name }}-kserve-route
+  apiKeyAuth:
+    credentialRefs:
+    - group: ""
+      kind: Secret
+      name: {{ include "model.keySecret" . }}
+    extractFrom:
+    - headers: ["Authorization"]
+    sanitize: true
+{{- if eq .Values.route.through "scheduler" }}
+---
+# The gateway's second hop presents the internal key.
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: BackendSecurityPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  targetRefs:
+  - group: aigateway.envoyproxy.io
+    kind: AIServiceBackend
+    name: {{ $name }}
+  type: APIKey
+  apiKey:
+    secretRef:
+      name: {{ include "model.keySecret" . }}
+{{- end }}
+{{- end }}

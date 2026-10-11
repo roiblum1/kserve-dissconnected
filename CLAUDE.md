@@ -6,7 +6,9 @@ Guidance for Claude Code when working in this repository.
 
 Four Helm wrapper charts installing Envoy Gateway v1.9.2, Envoy AI Gateway
 v1.2.0, LeaderWorkerSet v0.10.0 and KServe LLMInferenceService v0.21.0 on
-OpenShift, plus an `oc mirror` config for disconnected installs.
+OpenShift, plus an `oc mirror` config for disconnected installs, and
+`charts/llm-model`, which deploys one model on top of them (no upstream chart,
+no CRDs, one release per model; its README records the fleet-site setup).
 
 **Argo CD is the deployment target: one Application per chart directory**,
 created by the user in production (this repo ships no Application manifests —
@@ -30,6 +32,7 @@ charts/kserve-llmisvc-openshift/         wraps oci://ghcr.io/kserve/charts/kserv
                                          AND kserve-runtime-configs, both v0.21.0-rc1
   crds/                                  GENERATED: serving.kserve.io + llm-d.ai
   templates/llmisvcconfigs.yaml          the 13 presets, re-rendered at sync wave 10
+charts/llm-model/                        one LLMInferenceService + its gateway objects; README.md
 hack/update-crds.sh                       regenerates charts/*/crds/ from the vendored charts; --check
 hack/install-crds.sh                      plain-Helm only: applies the committed crds/; never Gateway API
 hack/charts/                              vendored CRD-source charts, so update-crds.sh runs offline
@@ -233,7 +236,8 @@ use. Check `oc get inferencepool -A` before touching it.
     `PreSync` with the hook weight, so the SCC RoleBinding hooks (invariant 4)
     need no wave annotation of their own; do not add one.
     * envoy-gateway: PreSync hooks; CRDs -10; everything else 0.
-    * envoy-ai-gateway: CRDs -10; SCC binding -5; controller/EnvoyProxy 0;
+    * envoy-ai-gateway: CRDs -10; SCC binding -5; controller/EnvoyProxy/rate
+      limit service/peer issuer 0; peer certificates 1;
       GatewayClass 1; **Gateway 2** (after the AI Gateway controller is
       healthy — this replaces the plain-Helm `oc rollout restart
       deploy/envoy-gateway`); Route 3.

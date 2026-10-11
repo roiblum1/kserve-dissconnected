@@ -43,11 +43,59 @@ spec:
         {{- if not (kindIs "invalid" $svc.allocateLoadBalancerNodePorts) }}
         allocateLoadBalancerNodePorts: {{ $svc.allocateLoadBalancerNodePorts }}
         {{- end }}
+      {{- if and .Values.gateway.envoyProxy.pdb (ge (int .Values.gateway.envoyProxy.replicas) 2) }}
+      envoyPDB:
+        {{- toYaml .Values.gateway.envoyProxy.pdb | nindent 8 }}
+      {{- end }}
       envoyDeployment:
         replicas: {{ .Values.gateway.envoyProxy.replicas }}
         container:
           resources:
             {{- toYaml .Values.gateway.envoyProxy.resources | nindent 12 }}
+  {{- if (.Values.gateway.envoyProxy.accessLog | default dict).enabled }}
+  telemetry:
+    accessLog:
+      settings:
+        - format:
+            type: JSON
+            json:
+              start_time: "%START_TIME%"
+              method: "%REQ(:METHOD)%"
+              path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+              authority: "%REQ(:AUTHORITY)%"
+              listener: "%DOWNSTREAM_LOCAL_PORT%"
+              response_code: "%RESPONSE_CODE%"
+              response_flags: "%RESPONSE_FLAGS%"
+              response_code_details: "%RESPONSE_CODE_DETAILS%"
+              duration: "%DURATION%"
+              bytes_received: "%BYTES_RECEIVED%"
+              bytes_sent: "%BYTES_SENT%"
+              upstream_host: "%UPSTREAM_HOST%"
+              upstream_cluster: "%UPSTREAM_CLUSTER%"
+              route_name: "%ROUTE_NAME%"
+              request_id: "%REQ(X-REQUEST-ID)%"
+              model: "%REQ(X-AI-EG-MODEL)%"
+              client_id: "%REQ(X-AIGW-CLIENT-ID)%"
+              objective: "%REQ(X-LLM-D-INFERENCE-OBJECTIVE)%"
+              claude_code_session: "%REQ(X-CLAUDE-CODE-SESSION-ID)%"
+              openwebui_chat: "%REQ(X-OPENWEBUI-CHAT-ID)%"
+              served_by: "%RESP(X-LLM-SERVED-BY)%"
+              user_agent: "%REQ(USER-AGENT)%"
+          sinks:
+            - type: File
+              file:
+                path: /dev/stdout
+  {{- end }}
+  {{- $shutdown := .Values.gateway.envoyProxy.shutdown | default dict }}
+  {{- if or $shutdown.drainTimeout $shutdown.minDrainDuration }}
+  shutdown:
+    {{- with $shutdown.drainTimeout }}
+    drainTimeout: {{ . }}
+    {{- end }}
+    {{- with $shutdown.minDrainDuration }}
+    minDrainDuration: {{ . }}
+    {{- end }}
+  {{- end }}
 ---
 {{- end }}
 {{- if .Values.gateway.gatewayClass.create }}
@@ -87,8 +135,30 @@ spec:
     - name: {{ .Values.gateway.listener.name }}
       port: {{ .Values.gateway.listener.port }}
       protocol: {{ .Values.gateway.listener.protocol }}
+      {{- with .Values.gateway.listener.tls }}
+      tls:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       allowedRoutes:
         {{- toYaml .Values.gateway.listener.allowedRoutes | nindent 8 }}
+    {{- if .Values.gateway.peers.enabled }}
+    # Other sites' gateways only. No hostname: the health checks and the
+    # forwarded requests both come with the server name of peers.serverName.
+    - name: {{ .Values.gateway.peers.name }}
+      port: {{ .Values.gateway.peers.port }}
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ .Values.gateway.peers.serverSecret }}
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              {{- toYaml .Values.gateway.peers.allowedNamespaceLabels | nindent 14 }}
+    {{- end }}
 {{- if .Values.gateway.clientTrafficPolicy.create }}
 ---
 #
@@ -108,8 +178,22 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: {{ .Values.gateway.name }}
+      {{- if .Values.gateway.peers.enabled }}
+      sectionName: {{ .Values.gateway.listener.name }}
+      {{- end }}
+  {{- with .Values.gateway.clientTrafficPolicy.removeRequestHeaders }}
+  headers:
+    earlyRequestHeaders:
+      remove:
+        {{- toYaml . | nindent 8 }}
+  {{- end }}
   connection:
     bufferLimit: {{ .Values.gateway.clientTrafficPolicy.bufferLimit }}
+  {{- with .Values.gateway.clientTrafficPolicy.idleTimeout }}
+  timeout:
+    http:
+      idleTimeout: {{ . }}
+  {{- end }}
   {{- with .Values.gateway.clientTrafficPolicy.http2 }}
   http2:
     {{- toYaml . | nindent 4 }}

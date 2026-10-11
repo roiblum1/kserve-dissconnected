@@ -1,0 +1,99 @@
+{{- if .Values.peer.enabled }}
+{{- $name := .Values.model.name -}}
+{{- $parent := dict "group" "gateway.networking.k8s.io" "kind" "Gateway" "name" .Values.gateway.name "namespace" .Values.gateway.namespace "sectionName" .Values.peer.listener -}}
+# The only way to the model: from another site's gateway, or this site's
+# own, on the peer listener. The entry has already checked the key and
+# counted the request, so nothing is counted here.
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: {{ $name }}-peer
+  namespace: {{ .Release.Namespace }}
+spec:
+  parentRefs:
+  # DO NOT REMOVE sectionName: without it the route is also on the listener
+  # clients reach, where it skips keys and quotas.
+  - {{- toYaml $parent | nindent 4 }}
+  rules:
+  - name: serve
+    matches:
+    - headers:
+      - type: Exact
+        name: x-ai-eg-model
+        value: {{ $name }}
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: {{ include "model.pool" . }}
+    timeouts:
+      request: {{ .Values.peer.requestTimeout }}
+    modelsOwnedBy: {{ .Release.Namespace }}
+---
+# What aigw-ui's health checks ask. It goes straight to vLLM, not through
+# the scheduler or the shed limit: a busy site must still answer, or a full
+# site would be taken for a dead one and lose all its traffic.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}-health
+  namespace: {{ .Release.Namespace }}
+spec:
+  parentRefs:
+  - {{- toYaml $parent | nindent 4 }}
+  rules:
+  - matches:
+    - path:
+        type: Exact
+        value: /healthz/{{ $name }}
+    filters:
+    - type: URLRewrite
+      urlRewrite:
+        path:
+          type: ReplaceFullPath
+          replaceFullPath: /health
+    backendRefs:
+    - name: {{ $name }}-kserve-workload-svc
+      port: 8000
+---
+# The HTTPRoute the gateway generates from the AIGatewayRoute has its name.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ $name }}-peer
+  namespace: {{ .Release.Namespace }}
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: {{ $name }}-peer
+  {{- with .Values.peer.maxParallelRequests }}
+  circuitBreaker:
+    maxParallelRequests: {{ . }}
+    maxPendingRequests: {{ . }}
+    maxConnections: 100000
+  {{- end }}
+  timeout:
+    http:
+      requestTimeout: {{ .Values.peer.requestTimeout }}
+{{- end }}
+{{- if .Values.peer.enabled }}
+---
+# vLLM closes a connection that has been idle for 5 seconds, and the health
+# checks come every 5 seconds, so about one check in five met a connection
+# that was just being closed and got 503. Three in a row take the site out.
+# The check is tried again on a new connection.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ .Values.model.name }}-health
+  namespace: {{ .Release.Namespace }}
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: {{ .Values.model.name }}-health
+  retry:
+    numRetries: 2
+    retryOn:
+      triggers: ["reset", "connect-failure"]
+{{- end }}

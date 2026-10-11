@@ -80,6 +80,8 @@ argocd:
     # With the Gateway it targets. A policy whose target does not exist yet is
     # only reported as not accepted, so this is for legibility.
     clientTrafficPolicy: "2"
+    # With the controller: it only needs the controller's Service to exist.
+    rateLimit: "0"
 
     # Last: it targets the Service Envoy Gateway creates in response to the
     # Gateway. Creating it earlier is harmless -- an OpenShift Route may point
@@ -134,6 +136,55 @@ gateway:
         #           kserve.io/inference: "true"
         from: All
 
+  # This cluster's name as registered in aigw-ui. Sent back in the response
+  # header x-llm-served-by on the peer listener, and written into the client
+  # certificate this gateway shows to other sites. Needed with peers.enabled.
+  site: ""
+
+  # ---- A second listener, for requests other sites forward here ----------
+  # Part of an aigw-ui fleet: a client enters at any site, that site checks
+  # the key and the budget, and forwards the request to the site that serves
+  # the model, over mutual TLS. Model charts attach their serving route here
+  # (model-chart peer.enabled) and nothing a client can reach is on it.
+  peers:
+    enabled: false
+    name: peers
+    port: 8443
+    # Server name every site's certificate carries: peers.llm.<domain>. The
+    # same on all sites; aigw-ui sends it (FLEET_PEER_SNI or FLEET_DOMAIN).
+    serverName: ""
+    # DO NOT REMOVE: only namespaces with this label may attach a route.
+    allowedNamespaceLabels:
+      aigw-ui.io/serving: "true"
+    # The fleet CA signs every site's certificates. Its key pair has to be
+    # the same Secret on every cluster (ACM policy or similar).
+    issuer:
+      # ClusterIssuer: model charts can then issue client certificates for
+      # their own benchmark jobs. The CA Secret is read from cert-manager's
+      # own namespace. Issuer: the Secret is read from the Gateway namespace.
+      kind: ClusterIssuer
+      name: llm-peer-issuer
+      create: true
+      caSecret: llm-fleet-ca
+    # The fleet CA certificate (PEM), published as ConfigMap `caConfigMap`
+    # with the key ca.crt. The listener checks client certificates against
+    # it and aigw-ui's entry routes check the other sites' certificates.
+    # Empty: the ConfigMap is not rendered and has to exist.
+    caBundle: ""
+    caConfigMap: llm-peer-ca
+    serverSecret: llm-peer-server
+    clientSecret: llm-peer-client
+    # Renewed 30 days before the end. An expired certificate takes the site
+    # out of every model without an error anywhere.
+    duration: 2160h
+    renewBefore: 720h
+
+  # GET <path> on the client listener answers 200 without a key. For the
+  # health monitor of a global load balancer.
+  health:
+    enabled: false
+    path: /healthz/gateway
+
   # How much of a request Envoy may buffer on a client connection.
   #
   # ADDED by this wrapper, and needed for real prompts. Envoy Gateway's default
@@ -152,6 +203,21 @@ gateway:
     create: true
     name: client-buffer-limit
     bufferLimit: 50Mi
+    # DO NOT REMOVE any entry: a client must not set these. The gateway and
+    # the scheduler set them after the key is checked.
+    removeRequestHeaders:
+      - x-aigw-client-id
+      - x-llm-d-inference-objective
+      - x-llm-d-inference-fairness-id
+      - x-gateway-inference-objective
+      - x-gateway-inference-fairness-id
+      - x-gateway-destination-endpoint
+      - x-gateway-destination-endpoint-subset
+      - x-llm-d-model-name-rewrite
+      - x-gateway-model-name-rewrite
+      - x-site-pin
+    # A streamed answer may be silent for a long time while the model thinks.
+    idleTimeout: 3600s
     http2:
       initialStreamWindowSize: 16Mi
       initialConnectionWindowSize: 24Mi
@@ -161,6 +227,21 @@ gateway:
   envoyProxy:
     create: true
     replicas: 1
+    # Rendered only with 2 or more replicas: with one, it would block every
+    # node drain.
+    pdb:
+      minAvailable: 1
+    # How long a proxy pod that is being stopped keeps its open streams. A
+    # restart cuts every answer that entered here, wherever it is served.
+    # Empty keeps Envoy Gateway's default (60s).
+    shutdown:
+      drainTimeout: ""
+      minDrainDuration: ""
+    # One JSON line per request with what is needed to follow a request from
+    # the site a client entered to the site that served it. Off keeps Envoy
+    # Gateway's default log.
+    accessLog:
+      enabled: false
     resources:
       requests:
         cpu: 100m
@@ -224,6 +305,38 @@ gateway:
       enabled: true
       termination: edge
       insecureEdgeTerminationPolicy: Redirect
+
+# ---------------------------------------------------------------------------
+# The rate limit service that enforces QuotaPolicy, and its Redis.
+#
+# The upstream chart only tells the controller where this service is
+# (`ai-gateway.controller.quotaRateLimitServiceAddr`); it does not deploy
+# it. Without it no quota is counted or enforced. It runs in the Envoy
+# Gateway namespace, under the name the controller looks for by default,
+# and takes its limits from the controller's xDS port 18002.
+#
+# Every site of a fleet has to use the SAME Redis, and so does aigw-ui,
+# which reads the counters from it.
+# ---------------------------------------------------------------------------
+rateLimit:
+  # Off by default because the Redis address has no default and this chart
+  # must render with no overrides. Turn it on wherever a QuotaPolicy is used:
+  # without this service a quota is accepted and never enforced.
+  enabled: false
+  name: envoy-ai-gateway-ratelimit
+  image: docker.io/envoyproxy/ratelimit:0482748e
+  replicas: 1
+  logLevel: info
+  resources: {}
+  redis:
+    # host:port. Required unless existingSecret is set.
+    url: ""
+    # Password, if Redis asks for one.
+    auth: ""
+    tls: false
+    # A Secret in the Envoy Gateway namespace with REDIS_URL and, if needed,
+    # REDIS_AUTH. Use it under Argo CD to keep the password out of git.
+    existingSecret: ""
 
 # ---------------------------------------------------------------------------
 # Upstream ai-gateway-helm values

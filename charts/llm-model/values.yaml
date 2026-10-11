@@ -1,0 +1,158 @@
+# The model. `name` is what tenants send as "model" and what vLLM serves.
+model:
+  name: qwen-tiny
+  uri: hf://Qwen/Qwen2.5-0.5B-Instruct
+  replicas: 1
+  # Empty keeps the image of KServe's template (GPU). The lab runs vLLM's CPU
+  # image: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v0.29.0
+  image: ""
+  # Appended to `vllm serve`. The first two are what the gateway needs to
+  # charge cached prompt tokens less and to count streamed answers.
+  args: "--enable-prompt-tokens-details --enable-force-include-usage"
+  env: []
+  resources: {}
+  # The llm-d scheduler (InferencePool and endpoint picker) in front of the
+  # replicas. It picks the replica that holds the prompt's prefix and serves
+  # the class `best-effort` last when flowControl is on.
+  scheduler: true
+  # How the scheduler picks a replica: each scorer rates every replica and
+  # the weights say how much each rating counts.
+  #   prefix:   the replica already holds the start of this prompt
+  #   queue:    few requests wait on the replica
+  #   kvCache:  the replica's KV cache is little used
+  #   noHitLru: for a prompt no replica holds, the replica that least
+  #             recently got such a prompt
+  # Google's write-up on GKE Inference Gateway started from
+  # prefix 3 : queue 3 : kvCache 2 and got its cache hits from 35% to 70% on
+  # a chat model with 3 : 5 : 2. Measure before and after a change:
+  # time to first token, and vllm:prefix_cache_hits / vllm:prefix_cache_queries.
+  scoring:
+    # false keeps KServe's default scheduler config while flowControl is
+    # off. The weights below are always used when flowControl is on.
+    custom: false
+    weights:
+      prefix: 3
+      queue: 2
+      kvCache: 2
+      noHitLru: 2
+  # Flow control: requests wait in the scheduler when the replicas are busy
+  # and are released in order of priority, so the class `best-effort`
+  # (priority -1) waits behind everyone else and gets 429 after requestTTL.
+  # NEEDS a gateway with agent-router#2595 (not in 1.2.0): without it the
+  # proxy calls the scheduler once per route match and every request times
+  # out. Proven with the endpoint picker v0.10.0 that KServe 0.21 deploys.
+  flowControl:
+    enabled: false
+    # Requests one replica runs at once: vLLM's --max-num-seqs. Above it the
+    # queue is in vLLM, which knows no priority.
+    maxConcurrency: 64
+    # How long a request may wait for a free slot before it gets 429. Keep
+    # below route.timeout. 60s is what was tested. In a fleet a shorter wait
+    # sends best-effort work to the next site sooner, but a standard request
+    # that waits longer gets 429 as well, and the entry does not retry that.
+    requestTTL: 60s
+    # Most requests of the classes below priority 0 (batch, best-effort) that
+    # may wait at once. Above it they get 429 at once instead of waiting.
+    # 0 keeps the scheduler's default (5000).
+    negativeBandMaxRequests: 0
+    # DO NOT flip without a lab test: true cancels running best-effort
+    # answers when standard requests wait. Not tested.
+    enableEviction: false
+  # KServe's download step writes its cache under $HOME, which is / and not
+  # writable under OpenShift's random user ID. Leave empty when the model
+  # comes from a volume and nothing is downloaded.
+  downloadHome: /tmp
+  # Create the LLMInferenceService. Turn off when another chart owns it and
+  # this chart should only add the gateway objects.
+  create: true
+  # What aigw-ui reads from the LLMInferenceService to weigh this site.
+  # revision: the checkpoint. Sites with different revisions of one model do
+  #           not share traffic. Empty leaves the annotation out.
+  # capacityPerInstance: what one ready replica of this recipe can serve,
+  #           relative to the other sites' recipes. 1 when all are the same.
+  # maxModelLen: rendered both as vLLM's --max-model-len and as the
+  #           annotation, so the two cannot differ. Empty leaves both out.
+  revision: ""
+  capacityPerInstance: "1"
+  maxModelLen: ""
+
+# The Gateway tenants send to, and the Service in front of its proxy.
+gateway:
+  name: envoy-ai-gateway
+  namespace: envoy-ai-gateway-system
+  serviceHost: envoy-ai-gateway.envoy-gateway-system.svc.cluster.local
+  servicePort: 80
+  # The listener clients come in on. Empty attaches the model's own route
+  # and KServe's route to every listener. Set it on a gateway that has a
+  # peer listener: otherwise both also land there, and the older of two
+  # routes for one model wins, so peer requests would take the direct route.
+  clientListener: ""
+
+route:
+  # The model's own route on the listener clients reach, with the Backend
+  # and AIServiceBackend a quota attaches to. Turn off on a fleet site once
+  # aigw-ui's entry route for the model has taken over (peer.enabled below):
+  # from then on the model is reachable only through the peer listener.
+  direct: true
+  # scheduler: the gateway counts the request, then sends it to KServe's own
+  #            route, which goes through the scheduler. Needs model.scheduler.
+  # service:   the gateway sends straight to the vLLM Service. No scheduler.
+  through: scheduler
+  # Seconds a request may take, streamed answers included.
+  timeout: 600s
+
+# KServe attaches its own route for the model to the same Gateway. Without
+# protection, any tenant with a valid key can call it and is never counted.
+# This key closes it: only the gateway's own second hop may use that route.
+# Give a value, or the name of a Secret that has it under the key `apiKey`.
+internalKey:
+  value: ""
+  existingSecret: ""
+
+# This cluster as a serving site of a fleet (aigw-ui "fleet" models). The
+# model is then reachable only on the gateway's listener for other sites,
+# with a client certificate. Keys, quotas and prices are checked once, at the
+# site the client entered, by the entry route aigw-ui creates.
+#
+# With peer.enabled the chart adds:
+#   - AIGatewayRoute <model>-peer on the peer listener, to the InferencePool
+#   - HTTPRoute <model>-health: /healthz/<model>, straight to vLLM's /health
+#   - BackendTrafficPolicy <model>-peer with the shed limit
+#   - the request classes below
+# Moving a model without a gap: first peer.enabled=true with route.direct
+# still true, then turn the model into a fleet model in aigw-ui, then
+# route.direct=false. With route.direct=false KServe creates no route of its
+# own, so there is no second way in and no internal key is needed.
+peer:
+  enabled: false
+  # The listener of gateway.name that only other sites reach.
+  listener: peers
+  # Requests the site takes at once, per proxy pod of the gateway. Above it
+  # the site answers 503 at once and the entry tries the next site.
+  # replicas x requests one replica holds / proxy pods of the gateway.
+  # 0 renders no limit.
+  maxParallelRequests: 0
+  # DO NOT lower: the gateway's default of 60s cuts long answers.
+  requestTimeout: 3600s
+
+# Request classes of the scheduler, by priority. Requests without a class
+# run at 0. `best-effort` is not here: aigw-ui creates it itself for every
+# model set to serve a spent budget as best-effort. Rendered with
+# peer.enabled or flowControl.enabled.
+objectives:
+  interactive: 10
+  standard: 0
+  batch: -10
+
+# Label the release namespace so the peer listener accepts its routes. Helm
+# cannot label a namespace it did not create: set create=true to let this
+# chart own the Namespace, or label it yourself:
+#   oc label namespace <ns> aigw-ui.io/serving=true
+namespace:
+  create: false
+
+# Alerts on the scheduler's queue (needs flowControl.enabled).
+alerts:
+  enabled: false
+  # Standard requests waiting this long means paying traffic is queued.
+  standardQueuedFor: 5m

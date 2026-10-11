@@ -1,0 +1,120 @@
+{{- if and .Values.gateway.enabled .Values.gateway.peers.enabled }}
+{{- $gwNs := include "envoy-ai-gateway-openshift.gatewayNamespace" . }}
+{{- $p := .Values.gateway.peers }}
+{{- $wave := dig "syncWave" dict (.Values.argocd | default dict) }}
+{{- $issuerRef := dict "group" "cert-manager.io" "kind" $p.issuer.kind "name" $p.issuer.name }}
+{{- if $p.issuer.create }}
+#
+# Signs this site's peer certificates with the fleet CA.
+#
+apiVersion: cert-manager.io/v1
+kind: {{ $p.issuer.kind }}
+metadata:
+  name: {{ $p.issuer.name }}
+  {{- if eq $p.issuer.kind "Issuer" }}
+  namespace: {{ $gwNs }}
+  {{- end }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave.envoyProxy) | nindent 2 }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ $p.issuer.caSecret }}
+---
+{{- end }}
+{{- with $p.caBundle }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $p.caConfigMap }}
+  namespace: {{ $gwNs }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave.envoyProxy) | nindent 2 }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" $ | nindent 4 }}
+data:
+  ca.crt: |
+    {{- . | trim | nindent 4 }}
+---
+{{- end }}
+# What other sites see when they connect to the peer listener.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $p.serverSecret }}
+  namespace: {{ $gwNs }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave.gatewayClass) | nindent 2 }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $p.serverSecret }}
+  duration: {{ $p.duration }}
+  renewBefore: {{ $p.renewBefore }}
+  dnsNames:
+    - {{ $p.serverName }}
+  usages: ["server auth"]
+  issuerRef:
+    {{- toYaml $issuerRef | nindent 4 }}
+---
+# What this gateway shows to another site's peer listener.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $p.clientSecret }}
+  namespace: {{ $gwNs }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave.gatewayClass) | nindent 2 }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $p.clientSecret }}
+  duration: {{ $p.duration }}
+  renewBefore: {{ $p.renewBefore }}
+  commonName: {{ .Values.gateway.site }}
+  uris:
+    - spiffe://{{ $p.serverName }}/site/{{ .Values.gateway.site }}
+  usages: ["client auth"]
+  issuerRef:
+    {{- toYaml $issuerRef | nindent 4 }}
+---
+#
+# The peer listener: a client certificate of the fleet CA is required, the
+# request ID of the entry site is kept, and every answer says which site
+# served it.
+#
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: {{ $p.name }}
+  namespace: {{ $gwNs }}
+  {{- include "envoy-ai-gateway-openshift.annotations" (dict "wave" $wave.clientTrafficPolicy) | nindent 2 }}
+  labels:
+    {{- include "envoy-ai-gateway-openshift.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.gateway.name }}
+      sectionName: {{ $p.name }}
+  tls:
+    clientValidation:
+      caCertificateRefs:
+        - group: ""
+          kind: ConfigMap
+          name: {{ $p.caConfigMap }}
+  headers:
+    requestID: PreserveOrGenerate
+    lateResponseHeaders:
+      set:
+        - name: x-llm-served-by
+          value: {{ .Values.gateway.site | quote }}
+  connection:
+    bufferLimit: {{ .Values.gateway.clientTrafficPolicy.bufferLimit }}
+  {{- with .Values.gateway.clientTrafficPolicy.http2 }}
+  http2:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.gateway.clientTrafficPolicy.idleTimeout }}
+  timeout:
+    http:
+      idleTimeout: {{ . }}
+  {{- end }}
+{{- end }}

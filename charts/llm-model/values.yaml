@@ -35,6 +35,17 @@ model:
       queue: 2
       kvCache: 2
       noHitLru: 2
+    # Another set of scorers, by plugin type and weight. When this is not
+    # empty it replaces `weights` above, and `producers` lists the data
+    # producers those scorers read. Example, load counted by the scheduler
+    # itself instead of read from vLLM's metrics:
+    #   producers: [approx-prefix-cache-producer, inflight-load-producer]
+    #   scorers:
+    #     active-request-scorer: 3   # fewest requests in flight
+    #     token-load-scorer: 1       # fewest tokens in flight
+    #     prefix-cache-scorer: 1
+    producers: []
+    scorers: {}
   # Flow control: requests wait in the scheduler when the replicas are busy
   # and are released in order of priority, so the class `best-effort`
   # (priority -1) waits behind everyone else and gets 429 after requestTTL.

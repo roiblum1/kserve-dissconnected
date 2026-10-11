@@ -35,7 +35,14 @@ spec:
     gateway: {}
     {{- end }}
     {{- $fc := .Values.model.flowControl }}
-    {{- $w := .Values.model.scoring.weights }}
+    {{- $sc := .Values.model.scoring }}
+{{- $w := $sc.weights }}
+{{- $scorers := $sc.scorers }}
+{{- $names := keys $scorers | sortAlpha }}
+{{- if not $scorers }}
+{{- $scorers = dict "queue-scorer" $w.queue "kv-cache-utilization-scorer" $w.kvCache "prefix-cache-scorer" $w.prefix "no-hit-lru-scorer" $w.noHitLru }}
+{{- $names = list "queue-scorer" "kv-cache-utilization-scorer" "prefix-cache-scorer" "no-hit-lru-scorer" }}
+{{- end }}
     {{- if or $fc.enabled .Values.model.scoring.custom }}
     scheduler:
       config:
@@ -47,10 +54,12 @@ spec:
           {{- end }}
           plugins:
           - type: single-profile-handler
-          - type: queue-scorer
-          - type: kv-cache-utilization-scorer
-          - type: prefix-cache-scorer
-          - type: no-hit-lru-scorer
+          {{- range $sc.producers }}
+          - type: {{ . }}
+          {{- end }}
+          {{- range $names }}
+          - type: {{ . }}
+          {{- end }}
           - type: max-score-picker
           {{- if $fc.enabled }}
           - type: concurrency-detector
@@ -60,14 +69,10 @@ spec:
           schedulingProfiles:
           - name: default
             plugins:
-            - pluginRef: queue-scorer
-              weight: {{ $w.queue }}
-            - pluginRef: kv-cache-utilization-scorer
-              weight: {{ $w.kvCache }}
-            - pluginRef: prefix-cache-scorer
-              weight: {{ $w.prefix }}
-            - pluginRef: no-hit-lru-scorer
-              weight: {{ $w.noHitLru }}
+            {{- range $names }}
+            - pluginRef: {{ . }}
+              weight: {{ index $scorers . }}
+            {{- end }}
             - pluginRef: max-score-picker
           {{- if $fc.enabled }}
           flowControl:

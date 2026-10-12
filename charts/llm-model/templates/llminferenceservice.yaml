@@ -102,6 +102,10 @@ spec:
       env:
       - name: VLLM_ADDITIONAL_ARGS
         value: {{ include "model.vllmArgs" . | quote }}
+      {{- with .Values.model.keepAliveSeconds }}
+      - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+        value: {{ . | quote }}
+      {{- end }}
       {{- with .Values.model.env }}
       {{- toYaml . | nindent 6 }}
       {{- end }}

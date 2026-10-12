@@ -21,7 +21,7 @@ env:
   UPSTREAM_REPO: theagentrouter/agent-router
   UPSTREAM_REF: v1.2.0
   PATCH_DIR: patches/agent-router-v1.2.0
-  IMAGE_TAG: v1.2.0-patched.1
+  IMAGE_TAG: v1.2.0-patched.2
   REGISTRY: docker.io/roi12345
 
 concurrency:

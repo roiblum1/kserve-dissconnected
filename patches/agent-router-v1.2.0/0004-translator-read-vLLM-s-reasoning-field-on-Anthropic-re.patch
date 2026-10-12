@@ -1,0 +1,177 @@
+From 548553663d8ff3288e533254b13f1ec558d6d518 Mon Sep 17 00:00:00 2001
+From: Roi Blum <roiblum05@gmail.com>
+Date: Mon, 12 Oct 2026 13:31:58 +0300
+Subject: [PATCH] translator: read vLLM's reasoning field on Anthropic requests
+ to OpenAI backends
+
+vLLM v0.16 and later return the reasoning text of a chat completion as
+"reasoning" and no longer as "reasoning_content". The translator that
+serves /anthropic/v1/messages from an OpenAI backend only knew the old
+name, so the reasoning was dropped: the client saw no thinking block, and
+a response cut off while the model was still thinking came back with
+"content": null and stop_reason max_tokens.
+
+Read "reasoning" on the message and on the streamed delta, and turn it
+into a thinking block the same way as a plain-string reasoning_content.
+reasoning_content wins when a backend sends both.
+
+Signed-off-by: Roi Blum <roiblum05@gmail.com>
+---
+ internal/apischema/openai/openai.go       |  9 +++
+ internal/translator/openai_helper.go      | 11 +++
+ internal/translator/openai_helper_test.go | 83 +++++++++++++++++++++++
+ 3 files changed, 103 insertions(+)
+
+diff --git a/internal/apischema/openai/openai.go b/internal/apischema/openai/openai.go
+index b992240..549538a 100644
+--- a/internal/apischema/openai/openai.go
++++ b/internal/apischema/openai/openai.go
+@@ -1516,6 +1516,11 @@ type ChatCompletionResponseChoiceMessage struct {
+ 	// like "reasoningContent" from AWS Bedrock.
+ 	ReasoningContent *ReasoningContentUnion `json:"reasoning_content,omitempty"`
+ 
++	// Reasoning is the name vLLM gives the reasoning text since v0.16, where it
++	// replaced reasoning_content. It is read from OpenAI-compatible backends and
++	// never set by a translator.
++	Reasoning string `json:"reasoning,omitempty"`
++
+ 	// ThinkingBlocks holds structured thinking metadata (signatures, redacted content) from providers
+ 	// that expose it (Anthropic, Bedrock, Gemini). This preserves full fidelity without breaking
+ 	// clients that expect reasoning_content to be a plain string.
+@@ -1694,6 +1699,10 @@ type ChatCompletionResponseChunkChoiceDelta struct {
+ 	Annotations *[]Annotation                            `json:"annotations,omitempty"`
+ 	// ReasoningContent serializes as a plain string; see StreamReasoningContent.
+ 	ReasoningContent *StreamReasoningContent `json:"reasoning_content,omitempty"`
++	// Reasoning is the name vLLM gives the reasoning delta since v0.16, where it
++	// replaced reasoning_content. It is read from OpenAI-compatible backends and
++	// never set by a translator.
++	Reasoning string `json:"reasoning,omitempty"`
+ 	// ThinkingBlocks carries provider-specific reasoning metadata (signatures, redacted
+ 	// content) that cannot be represented in the plain-string reasoning_content,
+ 	// following the LiteLLM convention also used on the non-streaming Message.
+diff --git a/internal/translator/openai_helper.go b/internal/translator/openai_helper.go
+index 7bb1e9b..4efc8ac 100644
+--- a/internal/translator/openai_helper.go
++++ b/internal/translator/openai_helper.go
+@@ -470,6 +470,12 @@ func appendThinkingBlocks(content []anthropic.MessagesContentBlock, msg *openai.
+ 
+ 	// Fall back to ReasoningContent (used by AWS Bedrock, Gemini, Qwen, DeepSeek).
+ 	if msg.ReasoningContent == nil {
++		// vLLM v0.16 and later name the field "reasoning".
++		if msg.Reasoning != "" {
++			content = append(content, anthropic.MessagesContentBlock{
++				Thinking: &anthropic.ThinkingBlock{Type: "thinking", Thinking: msg.Reasoning},
++			})
++		}
+ 		return content
+ 	}
+ 	// Some models (Qwen, DeepSeek) return reasoning content as a plain string.
+@@ -788,6 +794,11 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
+ 			if err := s.handleReasoningDelta(delta.ReasoningContent, out); err != nil {
+ 				return err
+ 			}
++		} else if delta.Reasoning != "" {
++			// vLLM v0.16 and later name the field "reasoning".
++			if err := s.handleReasoningDelta(&openai.StreamReasoningContent{Text: delta.Reasoning}, out); err != nil {
++				return err
++			}
+ 		}
+ 		// Signatures ride on thinking_blocks (reasoning_content is a plain string).
+ 		for i := range delta.ThinkingBlocks {
+diff --git a/internal/translator/openai_helper_test.go b/internal/translator/openai_helper_test.go
+index ea31c27..5043852 100644
+--- a/internal/translator/openai_helper_test.go
++++ b/internal/translator/openai_helper_test.go
+@@ -1434,6 +1434,89 @@ func TestOpenAIResponseToAnthropic_ReasoningContentString(t *testing.T) {
+ 	assert.Equal(t, "The answer is 4.", result.Content[1].Text.Text)
+ }
+ 
++func TestOpenAIResponseToAnthropic_ReasoningField(t *testing.T) {
++	// vLLM v0.16 and later return the reasoning under "reasoning", and a null
++	// content when the output limit is reached before the thinking ends.
++	for _, tc := range []struct {
++		name, body string
++		wantText   string
++		wantStop   anthropic.StopReason
++	}{
++		{
++			name:     "thinking then answer",
++			body:     `{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"The answer is 4.","reasoning":"Two plus two."}}]}`,
++			wantText: "The answer is 4.",
++			wantStop: anthropic.StopReasonEndTurn,
++		},
++		{
++			name:     "cut off while thinking",
++			body:     `{"choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":null,"reasoning":"Two plus two."}}]}`,
++			wantStop: anthropic.StopReasonMaxTokens,
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var resp openai.ChatCompletionResponse
++			require.NoError(t, json.Unmarshal([]byte(tc.body), &resp))
++			result := openAIResponseToAnthropic(&resp, "test-model")
++
++			require.NotEmpty(t, result.Content)
++			require.NotNil(t, result.Content[0].Thinking)
++			assert.Equal(t, "Two plus two.", result.Content[0].Thinking.Thinking)
++			if tc.wantText == "" {
++				require.Len(t, result.Content, 1)
++			} else {
++				require.Len(t, result.Content, 2)
++				require.NotNil(t, result.Content[1].Text)
++				assert.Equal(t, tc.wantText, result.Content[1].Text.Text)
++			}
++			require.NotNil(t, result.StopReason)
++			assert.Equal(t, tc.wantStop, *result.StopReason)
++		})
++	}
++}
++
++func TestOpenAIStreamToAnthropicState_ProcessBuffer_ReasoningField(t *testing.T) {
++	state := &openAIStreamToAnthropicState{
++		activeTools:  make(map[int64]*streamToolCall),
++		requestModel: "claude-3",
++	}
++
++	// The chunks as vLLM v0.16 and later send them.
++	input := `data: {"id":"chatcmpl-r","choices":[{"index":0,"delta":{"role":"assistant","content":""}}],"model":"m"}` + "\n\n" +
++		`data: {"id":"chatcmpl-r","choices":[{"index":0,"delta":{"reasoning":"Two plus"}}]}` + "\n\n" +
++		`data: {"id":"chatcmpl-r","choices":[{"index":0,"delta":{"reasoning":" two."}}]}` + "\n\n" +
++		`data: {"id":"chatcmpl-r","choices":[{"index":0,"delta":{"content":"4"}}]}` + "\n\n" +
++		`data: {"id":"chatcmpl-r","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
++		"data: [DONE]\n\n"
++	state.buffer.WriteString(input)
++
++	var out []byte
++	require.NoError(t, state.processBuffer(&out, true))
++
++	var blockStartTypes []string
++	var thinking string
++	for _, e := range parseSSEEventsFromBytes(out) {
++		switch e.eventType {
++		case "content_block_start":
++			if bytes.Contains([]byte(e.data), []byte(`"type":"thinking"`)) {
++				blockStartTypes = append(blockStartTypes, "thinking")
++			} else if bytes.Contains([]byte(e.data), []byte(`"type":"text"`)) {
++				blockStartTypes = append(blockStartTypes, "text")
++			}
++		case "content_block_delta":
++			var d struct {
++				Delta struct {
++					Thinking string `json:"thinking"`
++				} `json:"delta"`
++			}
++			require.NoError(t, json.Unmarshal([]byte(e.data), &d))
++			thinking += d.Delta.Thinking
++		}
++	}
++	require.Equal(t, []string{"thinking", "text"}, blockStartTypes)
++	assert.Equal(t, "Two plus two.", thinking)
++}
++
+ func TestOpenAIStreamToAnthropicState_ProcessBuffer_SignatureDelta(t *testing.T) {
+ 	state := &openAIStreamToAnthropicState{
+ 		activeTools:  make(map[int64]*streamToolCall),
+-- 
+2.54.0 (Apple Git-157)
+

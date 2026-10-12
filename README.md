@@ -52,7 +52,7 @@ has the values, the order to turn them on and what was tested.
 | [`PATCHES.md`](PATCHES.md) | Audit report: every change from upstream, and why |
 | [`UPGRADE.md`](UPGRADE.md) | Version-bump runbook and checklist |
 | [`UPGRADE-v1.2.0.md`](UPGRADE-v1.2.0.md) | The upgrade to Envoy Gateway v1.9.2 and AI Gateway v1.2.0 as it was done: what to mirror, the commands, what went wrong, what was measured, and the two patches |
-| `patches/agent-router-v1.2.0/` | Three fixes that are not in AI Gateway v1.2.0: quotas on multi-site routes, cached tokens on the Anthropic path, and one scheduler filter per pool |
+| `patches/agent-router-v1.2.0/` | Four fixes that are not in AI Gateway v1.2.0: quotas on multi-site routes, cached tokens on the Anthropic path, one scheduler filter per pool, and vLLM reasoning on the Anthropic path |
 | [`UPGRADE_ENVOY_AI_1.2.0-patches.md`](UPGRADE_ENVOY_AI_1.2.0-patches.md) | The patched AI Gateway v1.2.0 build: which feature needs which patch, how the images are built, how to move a cluster to them and back |
 | [`CLAUDE.md`](CLAUDE.md) | Working notes and invariants for this repo |
 

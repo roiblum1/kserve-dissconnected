@@ -1,4 +1,4 @@
-# Envoy AI Gateway v1.2.0 with the three patches
+# Envoy AI Gateway v1.2.0 with the four patches
 
 Written 2026-10-11. [`UPGRADE-v1.2.0.md`](UPGRADE-v1.2.0.md) is the upgrade to
 stock v1.2.0. This page is the step after it: running a build of v1.2.0 that
@@ -12,9 +12,11 @@ Stock v1.2.0 serves models. The patched build is needed for these:
 |---|---|---|---|
 | A quota on a model that aigw-ui serves from two or more sites | 0001 | Nothing is counted and nobody is refused | controller |
 | Cheaper cached tokens on `/anthropic/v1/messages` to vLLM | 0002 | A cached prompt is charged in full | extproc |
+| A reasoning model on vLLM 0.16 or later, called on `/anthropic/v1/messages` | 0004 | The client sees no thinking, and an answer cut off while the model is still thinking comes back as `"content": null` | extproc |
 | Flow control in the scheduler (`model.flowControl` in `charts/llm-model`), so best-effort requests wait behind the others | 0003 | Every request waits out its timeout and gets 429 | controller |
 
-`/v1/chat/completions` is not touched by 0002. A cluster with one site, no
+`/v1/chat/completions` is not touched by 0002 or 0004: there the gateway passes
+vLLM's answer through as it is, with the reasoning under `reasoning`. A cluster with one site, no
 Anthropic clients and no flow control can stay on stock v1.2.0.
 
 ## The patches
@@ -26,23 +28,27 @@ All are against the tag `v1.2.0` of `theagentrouter/agent-router`.
 | `0001-extensionserver-apply-QuotaPolicy-to-per-backend-clu.patch` | Pull request #2833, open | A release contains it |
 | `0002-translator-keep-cached-tokens-on-Anthropic-requests-.patch` | Pull request #2837, open. That one also covers cache writes; the file here is the first version, which is what was tested on the lab | A release contains it |
 | `0003-fix-add-one-InferencePool-ext-proc-filter-per-pool-n.patch` | Pull request #2595, merged 2026-10-08, in no release yet. A backport | The first release after v1.2.0 |
+| `0004-translator-read-vLLM-s-reasoning-field-on-Anthropic-re.patch` | Not proposed yet. Upstream `main` reads only `reasoning_content` | A release reads `reasoning` |
 
 ## The images
 
 | Image | Built from |
 |---|---|
-| `docker.io/roi12345/ai-gateway-controller:v1.2.0-patched.1` | v1.2.0 + 0001, 0002, 0003 |
-| `docker.io/roi12345/ai-gateway-extproc:v1.2.0-patched.1` | the same commit |
+| `docker.io/roi12345/ai-gateway-controller:v1.2.0-patched.2` | v1.2.0 + 0001 to 0004 |
+| `docker.io/roi12345/ai-gateway-extproc:v1.2.0-patched.2` | the same commit |
 
 Both must come from one commit with one version string. The binaries call
 themselves `v1.2.0`; a controller and an extproc that disagree on the
 version refuse each other's configuration.
 
-A new patch set gets a new tag (`v1.2.0-patched.2`). Never push over a tag.
+A new patch set gets a new tag (`v1.2.0-patched.3`). Never push over a tag.
 
 ### Building them
 
-Needs the internet, or a Go module proxy, once.
+CI does it: `.github/workflows/gateway-images.yml` runs when a patch or the
+workflow changes, and pushes both images under `IMAGE_TAG`. It never
+overwrites a tag, so a new patch set needs a new `IMAGE_TAG` there. By hand it
+is the same steps, and needs the internet, or a Go module proxy, once:
 
 ```bash
 git clone https://github.com/theagentrouter/agent-router && cd agent-router
@@ -60,8 +66,8 @@ COPY --chmod=755 app /app
 USER nonroot:nonroot
 ENTRYPOINT ["/app"]
 DOCKERFILE
-  podman build --platform linux/amd64 -t docker.io/roi12345/ai-gateway-$c:v1.2.0-patched.1 out/$c
-  podman push docker.io/roi12345/ai-gateway-$c:v1.2.0-patched.1
+  podman build --platform linux/amd64 -t docker.io/roi12345/ai-gateway-$c:v1.2.0-patched.2 out/$c
+  podman push docker.io/roi12345/ai-gateway-$c:v1.2.0-patched.2
 done
 ```
 
@@ -75,9 +81,9 @@ done
    ```bash
    helm upgrade envoy-ai-gateway charts/envoy-ai-gateway-openshift -n envoy-ai-gateway-system --wait \
      --set ai-gateway.controller.image.repository=docker.io/roi12345/ai-gateway-controller \
-     --set ai-gateway.controller.image.tag=v1.2.0-patched.1 \
+     --set ai-gateway.controller.image.tag=v1.2.0-patched.2 \
      --set ai-gateway.extProc.image.repository=docker.io/roi12345/ai-gateway-extproc \
-     --set ai-gateway.extProc.image.tag=v1.2.0-patched.1
+     --set ai-gateway.extProc.image.tag=v1.2.0-patched.2
    ```
 
    An `ImageDigestMirrorSet` cannot do this for you: it rewrites the registry
@@ -122,9 +128,19 @@ Set the four values back to `docker.io/envoyproxy/ai-gateway-controller`,
 restarts again. Before that, turn `model.flowControl.enabled` off on every
 model: with stock v1.2.0 it answers every request with 429.
 
+## Tags
+
+| Tag | Patches | Note |
+|---|---|---|
+| `v1.2.0-patched.1` | 0001, 0002, 0003 | The controller was pushed by hand, the extproc by CI |
+| `v1.2.0-patched.2` | 0001 to 0004 | Both by CI, from one commit |
+
+Going from `patched.1` to `patched.2` changes the extproc only in behaviour;
+set both image tags anyway so the pair stays one build.
+
 ## Not done
 
-- The images are built by hand with the commands above, not by CI.
+
 - Patch 0002 here is the first version. Cache writes on the Anthropic path
   are still charged as plain input.
 - Upstream pull request #2766 (a changed `QuotaPolicy` did not always reach

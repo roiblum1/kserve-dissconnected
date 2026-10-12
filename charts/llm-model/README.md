@@ -155,6 +155,7 @@ hub is given cluster-admin kubeconfigs; that was decided earlier.
 | `route.direct=false` | Removes the model's own route, Backend, AIServiceBackend and the internal key. The model is then reachable only through the peer listener |
 | `gateway.clientListener` | Pins the direct route and KServe's route to the client listener |
 | `model.revision`, `model.capacityPerInstance`, `model.maxModelLen` | The three annotations aigw-ui reads. `maxModelLen` also renders `--max-model-len` |
+| `model.keepAliveSeconds` | `VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, 75. vLLM closes an idle connection after 5 s by default, the same 5 s as the entry route's health check, so about one check in five failed with a connection reset. Rendered, not run with this value on the lab |
 | `model.scoring.weights` (`prefix`, `queue`, `kvCache`, `noHitLru`), `model.scoring.custom` | The scheduler's weights, 3 : 2 : 2 : 2 as before. Always used with flow control; `custom=true` uses them without it. Tested on the lab with queue 5, with and without flow control: the scheduler started with the new weights and answered. The effect on latency and cache hits is not measured |
 | `model.flowControl.negativeBandMaxRequests`, `.enableEviction` | How many requests below priority 0 may wait; above it they get 429 at once |
 | `namespace.create` | The Namespace with the label the peer listener asks for |

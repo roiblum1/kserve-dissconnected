@@ -10,6 +10,11 @@ model:
   # charge cached prompt tokens less and to count streamed answers.
   args: "--enable-prompt-tokens-details --enable-force-include-usage"
   env: []
+  # Seconds vLLM keeps an idle HTTP connection open (VLLM_HTTP_TIMEOUT_KEEP_ALIVE).
+  # vLLM's default is 5, which is also how often aigw-ui's entry route checks
+  # a site: the check then lands on a connection that is closing and counts
+  # as failed. 0 leaves vLLM's default.
+  keepAliveSeconds: 75
   resources: {}
   # The llm-d scheduler (InferencePool and endpoint picker) in front of the
   # replicas. It picks the replica that holds the prompt's prefix and serves
